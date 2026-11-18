@@ -25,6 +25,7 @@ import uuid
 import requests
 
 import remote_worker
+from jsonfile import write_json_atomic
 
 API = os.environ.get("WORKER_API_URL", "").rstrip("/")
 TOKEN = os.environ.get("WORKER_TOKEN", "").strip()
@@ -152,8 +153,8 @@ def fetch_transcript(job_id, claim, out_dir):
         payload = json.loads(body)
         if not remote_worker.valid_transcript(payload):
             return False
-        with open(os.path.join(out_dir, remote_worker.TRANSCRIPT_FILE), "w") as f:
-            json.dump({"source": payload["source"], "transcript": payload["transcript"]}, f)
+        write_json_atomic(os.path.join(out_dir, remote_worker.TRANSCRIPT_FILE),
+                          {"source": payload["source"], "transcript": payload["transcript"]})
         return True
     except Gone:
         raise

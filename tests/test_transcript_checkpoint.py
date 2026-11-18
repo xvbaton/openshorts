@@ -4,28 +4,37 @@ transcript of a DIFFERENT video.
 
 app.py re-enqueues an interrupted job with the same command and the same
 output directory (resume manifest). main.py leaves the finished transcript
-there, tied to the source's name and duration, picks it up on the re-run, and
-removes it once the job completes.
+there, tied to the source bytes, and picks it up on the re-run.
 """
 import json
 import os
+import sys
 
 import pytest
 
 main = pytest.importorskip("main")  # needs cv2/mediapipe, absent in minimal CI
 
 TRANSCRIPT = {"text": "hola", "language": "es",
-              "segments": [{"start": 0.0, "end": 1.0, "text": "hola", "words": []}]}
-SRC = "/app/output/job1/video.mp4"
+              "segments": [{"start": 0.0, "end": 1.0, "text": "hola",
+                            "words": [{"word": " hola", "start": 0.1, "end": 0.9}]}],
+              "metadata": {"backend": "whisperkit"}}
+SRC = None
 DUR = 58.64
 
 
-def _save(d, transcript=TRANSCRIPT, src=SRC, dur=DUR):
-    main.save_transcript_checkpoint(str(d), transcript, src, dur)
+@pytest.fixture(autouse=True)
+def source(tmp_path, monkeypatch):
+    path = tmp_path / "video.mp4"
+    path.write_bytes(b"video A")
+    monkeypatch.setattr(sys.modules[__name__], "SRC", str(path))
 
 
-def _load(d, src=SRC, dur=DUR):
-    return main.load_transcript_checkpoint(str(d), src, dur)
+def _save(d, transcript=TRANSCRIPT, src=None, dur=DUR):
+    main.save_transcript_checkpoint(str(d), transcript, src or SRC, dur)
+
+
+def _load(d, src=None, dur=DUR):
+    return main.load_transcript_checkpoint(str(d), src or SRC, dur)
 
 
 class TestRoundTrip:
@@ -34,11 +43,11 @@ class TestRoundTrip:
         assert os.path.isfile(tmp_path / main.TRANSCRIPT_CHECKPOINT)
         assert _load(tmp_path) == TRANSCRIPT
 
-    def test_resumed_cloud_job_redownloads_to_the_same_name(self, tmp_path):
-        # The re-run's file lives at the same path; a slightly different
-        # duration reading (container decoders differ by a frame) still matches.
+    def test_resumed_job_can_read_an_identical_copy(self, tmp_path):
         _save(tmp_path)
-        assert _load(tmp_path, dur=DUR + 0.3) == TRANSCRIPT
+        copy = tmp_path / "renamed.mp4"
+        copy.write_bytes(b"video A")
+        assert _load(tmp_path, src=copy, dur=DUR + 0.3) == TRANSCRIPT
 
     def test_missing_checkpoint_is_none(self, tmp_path):
         assert _load(tmp_path) is None
@@ -48,8 +57,16 @@ class TestNeverTheWrongTranscript:
     def test_another_file_in_the_same_directory_is_ignored(self, tmp_path):
         # THE RISK: CLI run on A dies after transcribing, then B is processed
         # in the same directory without -o. B must get its own transcript.
-        _save(tmp_path, src="/videos/A.mp4")
-        assert _load(tmp_path, src="/videos/B.mp4") is None
+        _save(tmp_path)
+        other = tmp_path / "other.mp4"
+        other.write_bytes(b"video B")
+        assert _load(tmp_path, src=other) is None
+
+    def test_same_name_size_and_duration_with_different_bytes_is_ignored(self, tmp_path):
+        _save(tmp_path)
+        with open(SRC, "wb") as f:
+            f.write(b"video B")
+        assert _load(tmp_path) is None
 
     def test_same_name_but_different_length_is_ignored(self, tmp_path):
         _save(tmp_path, dur=600.0)
@@ -68,6 +85,23 @@ class TestRobustness:
     def test_truncated_file_is_ignored(self, tmp_path):
         (tmp_path / main.TRANSCRIPT_CHECKPOINT).write_text('{"source": {"name": "vi')
         assert _load(tmp_path) is None
+
+    def test_invalid_word_timestamp_is_ignored(self, tmp_path):
+        _save(tmp_path)
+        path = tmp_path / main.TRANSCRIPT_CHECKPOINT
+        payload = json.loads(path.read_text())
+        payload["transcript"]["segments"][0]["words"][0]["end"] = -1
+        path.write_text(json.dumps(payload))
+        assert _load(tmp_path) is None
+
+    def test_failed_replace_keeps_the_last_complete_transcript(self, tmp_path, monkeypatch):
+        _save(tmp_path)
+        def interrupted(*args):
+            raise OSError("interrupted before rename")
+        with monkeypatch.context() as patch:
+            patch.setattr(os, "replace", interrupted)
+            _save(tmp_path, transcript={**TRANSCRIPT, "text": "different"})
+        assert _load(tmp_path) == TRANSCRIPT
 
     def test_unwritable_directory_does_not_raise(self, tmp_path):
         main.save_transcript_checkpoint(str(tmp_path / "missing" / "dir"), TRANSCRIPT, SRC, DUR)
@@ -113,7 +147,7 @@ class TestPrepareOnly:
             return TRANSCRIPT
         monkeypatch.setattr(main, "transcribe_video", transcribe)
         import source_cache
-        monkeypatch.setattr(source_cache, "fetch_transcript", lambda url, dur: None)
+        monkeypatch.setattr(source_cache, "fetch_transcript", lambda url, dur, path: None)
         stored = []
         monkeypatch.setattr(source_cache, "store_transcript",
                             lambda *a: stored.append(a) or True)
@@ -133,7 +167,7 @@ class TestPrepareOnly:
         assert not main.prepare_transcript(SRC, str(tmp_path), "https://youtu.be/x", "cache")
         assert calls == [] and _load(tmp_path) is None
         import source_cache
-        monkeypatch.setattr(source_cache, "fetch_transcript", lambda url, dur: TRANSCRIPT)
+        monkeypatch.setattr(source_cache, "fetch_transcript", lambda url, dur, path: TRANSCRIPT)
         assert main.prepare_transcript(SRC, str(tmp_path), "https://youtu.be/x", "cache")
         assert calls == [] and stored == [] and _load(tmp_path) == TRANSCRIPT
 

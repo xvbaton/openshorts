@@ -5347,10 +5347,6 @@ async def _run_job_remote(job_id, job_data):
                 jobs[job_id]['logs'].append(REMOTE_LOST_LOG)
                 return
         _finish_job(job_id, returncode, output_dir)
-        if returncode == 0:
-            # The worker's run is the job: the transcript prepared for it has
-            # no reader left (a failed run keeps it for the retry here).
-            remote_worker.drop_transcript(output_dir)
         if (returncode == 0 and remote_worker.source_is_url(cmd)
                 and "--keep-original" not in cmd):
             with suppress(OSError):

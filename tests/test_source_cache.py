@@ -21,7 +21,8 @@ def cache(tmp_path, monkeypatch):
 
 
 URL = "https://www.youtube.com/watch?v=q6fgVVmdpgY&t=42"
-TRANSCRIPT = {"language": "en", "segments": [{"start": 0.0, "end": 1.0, "text": "hi"}]}
+TRANSCRIPT = {"text": "hi", "language": "en",
+              "segments": [{"start": 0.0, "end": 1.0, "text": "hi", "words": []}]}
 
 
 def _download(tmp_path, name="job1", data=b"x" * 1000):
@@ -155,12 +156,22 @@ def test_transcript_rides_along_for_the_same_source(tmp_path, monkeypatch):
     job, path = _download(tmp_path)
     source_cache.store(URL, path, "Some Title")
     assert source_cache.store_transcript(URL, 600.0, TRANSCRIPT, path)
-    assert source_cache.fetch_transcript(URL, 600.2) == TRANSCRIPT
+    assert source_cache.fetch_transcript(URL, 600.2, path) == TRANSCRIPT
     # Another length is another file (a job that cut its source).
-    assert source_cache.fetch_transcript(URL, 300.0) is None
+    assert source_cache.fetch_transcript(URL, 300.0, path) is None
     # Another ASR backend transcribes differently.
-    monkeypatch.setenv("TRANSCRIBE_BACKEND", "whisper")
-    assert source_cache.fetch_transcript(URL, 600.0) is None
+    monkeypatch.setenv("WHISPER_MODEL", "base")
+    assert source_cache.fetch_transcript(URL, 600.0, path) is None
+
+
+def test_same_size_replacement_cannot_reuse_or_poison_cached_transcript(tmp_path):
+    _, path = _download(tmp_path, data=b"abc")
+    assert source_cache.store(URL, path, "Some Title")
+    assert source_cache.store_transcript(URL, 600, TRANSCRIPT, path)
+    _, different = _download(tmp_path, name="job2", data=b"def")
+    assert source_cache.fetch_transcript(URL, 600, different) is None
+    assert not source_cache.store_transcript(URL, 600, TRANSCRIPT, different)
+    assert source_cache.fetch_transcript(URL, 600, path) == TRANSCRIPT
 
 
 def test_a_cut_source_does_not_store_its_transcript(tmp_path):
@@ -171,7 +182,7 @@ def test_a_cut_source_does_not_store_its_transcript(tmp_path):
         f.write(b"y" * 10)
     os.replace(tmp, path)
     assert not source_cache.store_transcript(URL, 300.0, TRANSCRIPT, path)
-    assert source_cache.fetch_transcript(URL, 300.0) is None
+    assert source_cache.fetch_transcript(URL, 300.0, path) is None
 
 
 def test_storing_a_new_download_drops_the_old_transcript(tmp_path):
@@ -180,7 +191,7 @@ def test_storing_a_new_download_drops_the_old_transcript(tmp_path):
     source_cache.store_transcript(URL, 600.0, TRANSCRIPT, path)
     job2, path2 = _download(tmp_path, name="job2", data=b"z" * 900)
     source_cache.store(URL, path2, "Some Title")
-    assert source_cache.fetch_transcript(URL, 600.0) is None
+    assert source_cache.fetch_transcript(URL, 600.0, path2) is None
 
 
 def test_claim_makes_a_second_job_wait_for_the_first_download(tmp_path):

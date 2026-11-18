@@ -19,7 +19,7 @@ and the next job that asks for that id takes the file instead of downloading:
   proxy). Linked in, so the job's own cut (``cap_source_duration`` replaces
   the file, never writes into it) leaves the cached copy whole.
 * ``fetch_transcript`` / ``store_transcript``: the transcript of that exact
-  source (same duration, same ASR backend) rides along, so a repeat skips
+  source (same SHA-256 and ASR profile) rides along, so a repeat skips
   transcription too.
 * ``probe_get`` / ``probe_put``: what the metering probe learned at submit
   (length, best height), so a repeated submission does not ask YouTube
@@ -46,6 +46,7 @@ import shutil
 import tempfile
 import time
 from urllib.parse import parse_qs, urlparse
+from transcript_cache import SCHEMA_VERSION, media_sha256, valid_transcript
 
 _ID = re.compile(r"^[A-Za-z0-9_-]{11}$")
 _HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com",
@@ -280,15 +281,16 @@ def store(url, path, title):
         return False
 
 
-def _backend():
-    return os.environ.get("TRANSCRIBE_BACKEND", "").strip().lower() or "default"
+def _asr_profile():
+    from subtitles import get_whisper_config
+    return {"backend": os.environ.get("TRANSCRIBE_BACKEND", "whisper").strip().lower(),
+            "whisper": get_whisper_config()}
 
 
-def fetch_transcript(url, duration):
+def fetch_transcript(url, duration, source_path):
     """The cached transcript of this exact source, or None.
 
-    Only for the same length (a job that cut its source is not that file
-    any more) and the same ASR backend."""
+    A job that cut or replaced its source gets a cache miss."""
     if not enabled():
         return None
     vid = video_id(url)
@@ -296,21 +298,22 @@ def fetch_transcript(url, duration):
         return None
     data = _read_json(_paths(vid)[3])
     try:
-        if (not data or data.get("backend") != _backend()
-                or abs(float(data.get("duration")) - float(duration)) > 0.5):
+        if (not data or data.get("version") != SCHEMA_VERSION
+                or data.get("profile") != _asr_profile()
+                or not abs(float(data.get("duration")) - float(duration)) <= 0.5):
             return None
         t = data.get("transcript")
-        if not isinstance(t, dict) or not isinstance(t.get("segments"), list) or not t["segments"]:
+        if not valid_transcript(t) or data.get("sha256") != media_sha256(source_path):
             return None
         print(f"♻️ Transcript reused from the download cache ({vid}).")
         return t
-    except (TypeError, ValueError):
+    except (OSError, TypeError, ValueError):
         return None
 
 
 def store_transcript(url, duration, transcript, source_path):
     """Keep the transcript next to the cached source, if ``source_path`` is it."""
-    if not enabled() or not isinstance(transcript, dict) or not transcript.get("segments"):
+    if not enabled() or not valid_transcript(transcript):
         return False
     vid = video_id(url)
     if not vid:
@@ -320,14 +323,12 @@ def store_transcript(url, duration, transcript, source_path):
         if hit is None:
             return False
         media, _ = hit
-        # The very file this job transcribed, uncut: the same inode, or (a
-        # copy across filesystems) the same size.
-        a, b = os.stat(media), os.stat(source_path)
-        same = (a.st_ino == b.st_ino and a.st_dev == b.st_dev) or a.st_size == b.st_size
-        if not same:
+        digest = media_sha256(source_path)
+        if not os.path.samefile(media, source_path) and digest != media_sha256(media):
             return False
-        _write_json(_paths(vid)[3], {"backend": _backend(), "duration": float(duration),
-                                     "transcript": transcript})
+        _write_json(_paths(vid)[3], {"profile": _asr_profile(), "duration": float(duration),
+                                   "sha256": digest, "version": SCHEMA_VERSION,
+                                   "transcript": transcript})
         return True
     except Exception as e:
         print(f"⚠️ Could not keep the transcript in the download cache ({type(e).__name__}: {e}).")

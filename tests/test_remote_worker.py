@@ -993,10 +993,9 @@ def test_end_to_end_with_the_real_worker(api, monkeypatch, tmp_path):
     assert open(os.path.join(d, ".marked")).read() == "1"   # written by the API, not sent
     # The job's option reached the worker; the API's proxy and model key did not.
     assert "SEEN watermark=1 proxy=None key=the-workers-own-key" in job["logs"]
-    # The transcript this host prepared reached the worker's main.py, and
-    # once the job is done nothing of it stays here.
+    # The prepared transcript reaches main.py and stays on the API host.
     assert "TRANSCRIPT hola" in job["logs"]
-    assert not os.path.exists(os.path.join(d, rw.TRANSCRIPT_FILE))
+    assert json.loads(rw.read_transcript(d)) == CHECKPOINT
     assert not m._remote_jobs and job_id not in m._running_jobs
     assert m.concurrency_semaphore._value == 2
     assert not rw.is_remote(d)

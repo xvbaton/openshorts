@@ -42,6 +42,7 @@ from ffmpeg_utils import (video_encode_args, audio_encode_args, cut_clip, QUALIT
 from dotenv import load_dotenv
 import json
 from jsonfile import write_json_atomic
+from transcript_cache import SCHEMA_VERSION, media_sha256, valid_transcript
 
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning, module='google.protobuf')
@@ -1994,25 +1995,25 @@ def process_video_to_vertical(input_video, final_output_video, aspect_ratio=ASPE
 # (app.py) with the SAME output directory. Transcription is the slow, paid part
 # of the pipeline that ran before the interruption, so the finished transcript
 # is left in the job directory and picked up by the re-run instead of
-# transcribing again. Same shape and same validation as --transcript.
+# transcribing again. Keep it with the job after export, too.
 TRANSCRIPT_CHECKPOINT = ".transcript_checkpoint.json"
 
 
 def _checkpoint_source_key(input_video, duration):
-    """What ties a checkpoint to ONE source. Not the path: a resumed cloud job
-    re-downloads to the same name, and the CLI may be pointed at a different
-    file in a directory where an earlier run died. Name plus duration is what
-    both the server and a careful CLI user keep stable across the two runs."""
-    return {"name": os.path.basename(input_video), "duration": round(float(duration), 1)}
+    """Identify the exact media bytes, even if the job moved or renamed them."""
+    return {"name": os.path.basename(input_video), "duration": round(float(duration), 1),
+            "sha256": media_sha256(input_video), "version": SCHEMA_VERSION}
 
 
 def save_transcript_checkpoint(output_dir, transcript, input_video, duration):
     """Best effort: a failure here must never fail the job."""
     try:
+        if not valid_transcript(transcript):
+            return
         payload = {"source": _checkpoint_source_key(input_video, duration),
                    "transcript": transcript}
-        with open(os.path.join(output_dir, TRANSCRIPT_CHECKPOINT), "w") as f:
-            json.dump(payload, f)
+        write_json_atomic(os.path.join(output_dir, TRANSCRIPT_CHECKPOINT), payload,
+                          ensure_ascii=False, allow_nan=False)
     except Exception as e:
         print(f"⚠️ Could not save transcript checkpoint: {e}")
 
@@ -2029,14 +2030,15 @@ def load_transcript_checkpoint(output_dir, input_video, duration):
         with open(path) as f:
             payload = json.load(f)
         source = payload.get("source") or {}
-        expected = _checkpoint_source_key(input_video, duration)
-        if source.get("name") != expected["name"] \
-                or abs(float(source.get("duration", -1)) - expected["duration"]) > 0.5:
+        if source.get("version") != SCHEMA_VERSION:
+            return None
+        if (not abs(float(source.get("duration", -1)) - duration) <= 0.5
+                or source.get("sha256") != media_sha256(input_video)):
             print("⏭️ Transcript checkpoint belongs to another source — ignoring it.")
             return None
         transcript = payload.get("transcript") or {}
-        if not transcript.get("segments"):
-            raise ValueError("checkpoint has no segments")
+        if not valid_transcript(transcript):
+            raise ValueError("invalid transcript or timestamps")
         return transcript
     except Exception as e:
         print(f"⚠️ Ignoring unusable transcript checkpoint ({e}).")
@@ -2066,7 +2068,7 @@ def prepare_transcript(input_video, output_dir, url, mode):
         transcript, from_cache = None, False
         if url:
             import source_cache
-            transcript = source_cache.fetch_transcript(url, duration)
+            transcript = source_cache.fetch_transcript(url, duration, input_video)
             from_cache = transcript is not None
         if transcript is None and mode == "1":
             from transcribe_backends import NoAudioError
@@ -2081,7 +2083,7 @@ def prepare_transcript(input_video, output_dir, url, mode):
             except TimeoutError:
                 print("⏭️ No free transcription slot here: the renderer transcribes.")
                 return False
-        if transcript is None or not transcript.get("segments"):
+        if not valid_transcript(transcript):
             return False
         save_transcript_checkpoint(output_dir, transcript, input_video, duration)
         if url and not from_cache:
@@ -2789,19 +2791,22 @@ if __name__ == '__main__':
         # precomputed transcript already has them. SOURCE_CAP_MINUTES is set on
         # every metered job but only cuts a download clearly longer than the
         # reservation; when it does, the early result is dropped below.
-        early = {"lock": threading.Lock(), "done": threading.Event(), "started": False,
+        early = {"lock": threading.Lock(), "transcribed": threading.Event(),
+                 "done": threading.Event(), "started": False,
                  "abandoned": False, "invalid": False, "transcript": None, "clips": None}
 
         def _early_work(audio_path, audio_duration):
             try:
-                t = transcribe_video(audio_path)
-                early["transcript"] = t
+                try:
+                    t = transcribe_video(audio_path)
+                    early["transcript"] = t
+                finally:
+                    early["transcribed"].set()
                 if audio_duration and not speech_is_sparse(t, audio_duration):
                     early["clips"] = get_viral_clips(t, audio_duration,
                                                      viewer_clips=viewer_clips)
             except Exception as e:
                 print(f"   ℹ️ Early transcription skipped ({type(e).__name__}: {e}).")
-                early["transcript"] = early["clips"] = None
             finally:
                 early["done"].set()
                 try:
@@ -2949,6 +2954,7 @@ if __name__ == '__main__':
                     raise ValueError("transcript has no segments")
                 print(f"⏩ Reusing precomputed transcript "
                       f"({len(transcript['segments'])} segments) — skipping transcription.")
+                save_transcript_checkpoint(output_dir, transcript, input_video, duration)
             except Exception as e:
                 print(f"⚠️ Could not use precomputed transcript ({e}) — transcribing normally.")
                 transcript = None
@@ -2958,7 +2964,7 @@ if __name__ == '__main__':
                 early_state["abandoned"] = True  # a late audio would only duplicate work
                 started = early_state["started"]
             if started and not early_state["invalid"]:
-                early_state["done"].wait()
+                early_state["transcribed"].wait()
                 if early_state["transcript"] is not None:
                     transcript = early_state["transcript"]
                     print(f"♻️ Using the transcript made while the video downloaded "
@@ -2967,13 +2973,13 @@ if __name__ == '__main__':
         if transcript is None:
             transcript = load_transcript_checkpoint(output_dir, input_video, duration)
             if transcript is not None:
-                print(f"♻️ Reusing the transcript from the interrupted run "
+                print(f"♻️ Reusing the saved transcript "
                       f"({len(transcript['segments'])} segments) — skipping transcription.")
         # Another job already transcribed this very source (download cache).
         transcript_from_cache = False
         if transcript is None and args.url:
             import source_cache
-            transcript = source_cache.fetch_transcript(args.url, duration)
+            transcript = source_cache.fetch_transcript(args.url, duration, input_video)
             if transcript is not None:
                 transcript_from_cache = True
                 save_transcript_checkpoint(output_dir, transcript, input_video, duration)
@@ -2997,7 +3003,10 @@ if __name__ == '__main__':
             transcript = None
 
         # 4. Gemini Analysis (transcript-driven, or vision for silent videos)
-        early_clips = (early_state or {}).get("clips") if early_state else None
+        early_clips = None
+        if transcript is not None and early_state and transcript is early_state["transcript"]:
+            early_state["done"].wait()
+            early_clips = early_state["clips"]
         if (transcript is not None and early_clips
                 and transcript is early_state["transcript"]):
             print("♻️ Using the clips Gemini picked while the video downloaded.")
@@ -3177,9 +3186,5 @@ if __name__ == '__main__':
     if args.url and not args.keep_original and os.path.exists(input_video):
         os.remove(input_video)
         print(f"🗑️  Cleaned up downloaded video.")
-    # The job finished: a later run in this directory must transcribe afresh.
-    if not args.skip_analysis:
-        clear_transcript_checkpoint(output_dir)
-
     total_time = time.time() - script_start_time
     print(f"\n⏱️  Total execution time: {total_time:.2f}s")
