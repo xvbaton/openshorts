@@ -209,6 +209,46 @@ Self-hosting OpenShorts is free. You provide the machine and you only pay for th
 
 ## Getting Started
 
+### Démarrer CLIPIN Engine sur le Mac
+
+Ouvrir Docker Desktop et Ollama. Vérifier que `ollama list` affiche
+`qwen3.5:4b`. Si le modèle manque, exécuter `ollama pull qwen3.5:4b`.
+
+Dans un premier terminal, lancer le pont WhisperKit avec le CLI et les poids
+du sprint 1. Laisser ce terminal ouvert. Voir la
+[préparation du Mac](docs/architecture/asr-benchmark.md#préparation-du-mac)
+pour installer ces fichiers sur une nouvelle machine.
+
+```sh
+cd ~/Projets/clipin-engine
+python3 whisperkit_host.py \
+  --cli .cache/argmax-oss-swift/.build/release/argmax-cli \
+  --model-path .cache/models/openai_whisper-small
+```
+
+Dans un second terminal, démarrer l’interface et le backend FFmpeg.
+
+```sh
+cd ~/Projets/clipin-engine
+clipin() {
+  docker compose -p clipin-local -f docker-compose.yml -f docker-compose.clipin.local.yml "$@"
+}
+clipin up --build -d backend frontend
+curl -fsS http://127.0.0.1:8001/health/ready
+```
+
+Ouvrir [le tableau de bord CLIPIN](http://127.0.0.1:5176) et importer une
+vidéo dans **Clip Generator**. Le profil CPU de Docker utilise WhisperKit
+sur l’hôte pour la transcription et Qwen 4B pour sélectionner les clips.
+La première requête construit ses propres checkpoints dans le dossier du job.
+Pour transcrire sur CPU sans le pont, utiliser
+`CLIPIN_ASR_BACKEND=whisper clipin up --build -d backend frontend`.
+
+`clipin logs -f backend` affiche les traitements en cours. Les fonctions du
+tableau de bord qui utilisent le service de rendu séparé peuvent être activées
+avec `clipin up --build -d renderer`. Pour arrêter CLIPIN, utiliser
+`clipin down` et arrêter le pont WhisperKit avec Ctrl+C.
+
 ### 1. Clone
 ```bash
 git clone https://github.com/mutonby/openshorts.git

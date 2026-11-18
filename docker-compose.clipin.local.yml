@@ -1,0 +1,23 @@
+# Run with docker-compose.yml under the clipin-local project.
+services:
+  backend:
+    container_name: !reset null
+    ports: !override
+      - "127.0.0.1:8001:8000"
+    environment:
+      BILLING_ENABLED: "0"
+      MAX_CONCURRENT_JOBS: "1"
+      LLM_PROVIDER: ollama
+      LLM_MODEL: "qwen3.5:4b"
+      LLM_BASE_URL: http://host.docker.internal:11434
+      LLM_SCORE_THINK: "0"
+      TRANSCRIBE_BACKEND: ${CLIPIN_ASR_BACKEND:-whisperkit}
+      WHISPERKIT_URL: http://host.docker.internal:50060/transcribe
+      WHISPERKIT_MODEL: openai_whisper-small
+  frontend:
+    container_name: !reset null
+    ports: !override
+      - "127.0.0.1:5176:5173"
+  renderer:
+    container_name: !reset null
+    ports: !reset []
