@@ -255,7 +255,7 @@ def _run_whisper_once(media_path, *, force_cpu=False, **params):
         # the GPU, and holding it through a CPU decode starves every job
         # that would transcribe on the card in seconds.
         release_host_slot()
-    gate = _ASR_GATE if not force_cpu and _whisper_device() != "cpu" else _NULL_GATE
+    gate = _ASR_GATE if force_cpu or _whisper_device() != "cpu" else _NULL_GATE
     # The model is fetched inside the gate: release_models() drains the gate
     # before unloading, so a transcription can never start on a model that is
     # being dropped underneath it.

@@ -132,6 +132,23 @@ class _FakeCapture:
         pass
 
 
+def test_trimmed_source_retains_marker_to_reject_the_original_transcript(monkeypatch):
+    monkeypatch.setattr(main.cv2, "VideoCapture", _FakeCapture)
+
+    def ffmpeg(cmd, **kwargs):
+        with open(cmd[-1], "wb") as out:
+            out.write(b"trimmed video")
+
+    monkeypatch.setattr(main.subprocess, "run", ffmpeg)
+    assert not main._source_was_cut(SRC)
+    main.cap_source_duration(SRC, 0.1)
+    assert main._source_was_cut(SRC)
+    assert not main._source_was_cut(SRC, ranged=True)
+    with open(SRC, "wb") as out:
+        out.write(b"replacement video")
+    assert not main._source_was_cut(SRC)
+
+
 class TestPrepareOnly:
     """--prepare-only leaves the transcript for the run that renders the job
     (the remote worker): from the download cache or transcribed on this host."""

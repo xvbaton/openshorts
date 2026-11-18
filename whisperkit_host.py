@@ -1,11 +1,12 @@
 """Loopback bridge to a one-shot WhisperKit CLI on the Mac."""
 import argparse
 from functools import partial
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
 import subprocess
 import tempfile
+import threading
 import time
 
 from transcript_cache import valid_transcript
@@ -17,10 +18,11 @@ _MAX_WAV_BYTES = 128 * 1024 * 1024
 class TranscriptionHandler(BaseHTTPRequestHandler):
     timeout = 30
 
-    def __init__(self, *args, cli, model_path, inference_timeout, **kwargs):
+    def __init__(self, *args, cli, model_path, inference_timeout, slot, **kwargs):
         self.cli = cli
         self.model_path = model_path
         self.inference_timeout = inference_timeout
+        self.slot = slot
         super().__init__(*args, **kwargs)
 
     def do_POST(self):
@@ -36,7 +38,14 @@ class TranscriptionHandler(BaseHTTPRequestHandler):
             return self.send_error(411)
         if remaining > _MAX_WAV_BYTES:
             return self.send_error(413)
+        if not self.slot.acquire(blocking=False):
+            return self.send_error(503, "WhisperKit is already transcribing")
+        try:
+            self._respond_with_transcript(remaining)
+        finally:
+            self.slot.release()
 
+    def _respond_with_transcript(self, remaining):
         with tempfile.TemporaryDirectory(prefix="clipin-whisperkit-") as directory:
             wav = Path(directory) / "input.wav"
             try:
@@ -51,7 +60,7 @@ class TranscriptionHandler(BaseHTTPRequestHandler):
                 subprocess.run([
                     self.cli, "transcribe", "--model-path", self.model_path,
                     "--audio-path", str(wav), "--report", "--report-path", directory,
-                    "--word-timestamps", "--skip-special-tokens",
+                    "--word-timestamps", "--skip-special-tokens", "--incremental-loading",
                     "--audio-encoder-compute-units", "cpuAndGPU",
                     "--text-decoder-compute-units", "cpuAndGPU",
                 ], check=True, timeout=self.inference_timeout, stdin=subprocess.DEVNULL,
@@ -61,7 +70,8 @@ class TranscriptionHandler(BaseHTTPRequestHandler):
                     return self.send_error(502, "Invalid WhisperKit report")
                 report["metadata"] = {
                     "backend": "whisperkit", "model": Path(self.model_path).name,
-                    "compute_units": "cpuAndGPU", "wall_seconds": time.monotonic() - started,
+                    "compute_units": "cpuAndGPU", "audio_loading": "incremental",
+                    "wall_seconds": time.monotonic() - started,
                 }
                 body = json.dumps(report, ensure_ascii=False, allow_nan=False).encode("utf-8")
             except subprocess.TimeoutExpired:
@@ -79,8 +89,8 @@ class TranscriptionHandler(BaseHTTPRequestHandler):
 
 def serve(cli, model_path, port=50060, timeout=600):
     handler = partial(TranscriptionHandler, cli=cli, model_path=model_path,
-                      inference_timeout=timeout)
-    return HTTPServer(("127.0.0.1", port), handler)
+                      inference_timeout=timeout, slot=threading.Lock())
+    return ThreadingHTTPServer(("127.0.0.1", port), handler)
 
 
 if __name__ == "__main__":

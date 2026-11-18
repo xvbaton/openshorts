@@ -257,7 +257,8 @@ def test_release_models_is_a_no_op_when_nothing_is_loaded(monkeypatch):
     assert tb._whisper_model is None and tb._parakeet_model is None
 
 
-def test_whisper_model_is_fetched_inside_the_gate(monkeypatch):
+@pytest.mark.parametrize("force_cpu", [False, True])
+def test_whisper_model_is_fetched_inside_the_gate(monkeypatch, force_cpu):
     """release_models drains the gate before unloading; that only protects a
     transcription if the model is taken *after* the gate is held."""
     order = []
@@ -278,9 +279,9 @@ def test_whisper_model_is_fetched_inside_the_gate(monkeypatch):
     monkeypatch.setattr(tb, "_ASR_GATE", _Gate())
     monkeypatch.setattr(tb, "_whisper_device", lambda: "cuda")
     monkeypatch.setattr(tb, "_get_whisper_model",
-                        lambda: (order.append("model"), (_Model(), "cuda"))[1])
+                        lambda **kw: (order.append("model"), (_Model(), "cuda"))[1])
 
-    tb._run_whisper_once("x.mp4")
+    tb._run_whisper_once("x.mp4", force_cpu=force_cpu)
 
     assert order == ["gate", "model", "transcribe"]
 

@@ -844,6 +844,11 @@ def test_a_transcript_that_is_not_the_checkpoints_shape_is_refused(bad):
     assert rw.valid_transcript(CHECKPOINT)
 
 
+def test_a_completed_silent_transcript_can_be_forwarded():
+    checkpoint = {**CHECKPOINT, "transcript": {"text": "", "language": "fr", "segments": []}}
+    assert rw.valid_transcript(checkpoint)
+
+
 def test_the_prepared_transcript_is_announced_and_read_as_data(tmp_path, monkeypatch):
     d = str(tmp_path)
     rw.begin(d, "w1")

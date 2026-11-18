@@ -8,7 +8,7 @@
 | whisper.cpp | Metal, avec option Core ML pour l’encodeur | Le serveur natif renvoie des timestamps de tokens dans son JSON détaillé. Il faudrait regrouper les tokens en mots et vérifier les bornes. [Accélération](https://github.com/ggml-org/whisper.cpp/tree/v1.9.5#core-ml-support) · [Format du serveur](https://github.com/ggml-org/whisper.cpp/blob/v1.9.5/examples/server/server.cpp#L1070-L1171) |
 | faster-whisper | CPU dans Docker sur le Mac | Chemin existant et repli automatique. Les mots, segments et métadonnées gardent le format OpenShorts. |
 
-Le pont écoute sur la boucle locale. Il traite une transcription à la fois, lance le CLI avec le modèle Core ML déjà présent sur disque et attend la fin du processus avant de répondre. Qwen peut démarrer après cette réponse. Les poids n’ont pas à rester chargés dans un serveur de transcription. Chaque transcription paie la réinitialisation du modèle, à inclure dans la mesure.
+Le pont écoute sur la boucle locale. Il traite une transcription à la fois, lance le CLI avec le modèle Core ML déjà présent sur disque et attend la fin du processus avant de répondre. Qwen peut démarrer après cette réponse. Le CLI charge l’audio par blocs pour limiter l’allocation audio. Chaque transcription paie la réinitialisation du modèle, à inclure dans la mesure. Une autre requête reçue pendant une transcription revient immédiatement sur CPU. Garder `MAX_CONCURRENT_JOBS=1` sur le Mac pour éviter le chevauchement de jobs indépendants.
 
 Un dépassement de la limite serveur de 600 s arrête et récupère le processus avant la réponse d’erreur. Le client Docker attend jusqu’à 660 s. Une panne réseau ou un arrêt forcé du pont peut empêcher le client de confirmer la fin du processus natif. La mémoire unifiée, la pression mémoire et le swap restent à mesurer sur le Mac. Le pont accepte un WAV de 128 Mio maximum, soit environ 70 minutes en mono PCM 16 kHz, puis le backend revient sur CPU.
 
@@ -73,3 +73,5 @@ Le volume Hugging Face est dédié au benchmark. Relever le temps total et, pour
 | Pression mémoire et swap ajouté | — | À mesurer | À mesurer |
 
 Le JSON versionné `.transcript_checkpoint.json` reste dans le dossier du job après la fin et suit la rétention de ce dossier. La reprise vérifie la source par SHA-256 et la structure des timestamps. Une copie du même fichier peut réutiliser le transcript. Un nouvel upload local créant un autre job a son propre dossier. Un ancien JSON sans empreinte entraîne un nouveau passage ASR. Pour comparer deux moteurs, utiliser deux dossiers, car un transcript valide reste réutilisable pour ce job même si le moteur configuré change.
+
+Le transfert existant vers les workers distants conserve le transcript préparé par l’API. Un transcript calculé seulement sur un worker distant reste soumis au nettoyage de son dossier de travail.

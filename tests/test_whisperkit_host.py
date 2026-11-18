@@ -2,6 +2,7 @@ import json
 import os
 import sys
 import threading
+import time
 
 import httpx
 import pytest
@@ -30,7 +31,10 @@ pathlib.Path({str(pid_file)!r}).write_text(str(os.getpid()))
 audio = pathlib.Path(sys.argv[sys.argv.index("--audio-path") + 1])
 assert audio.read_bytes() == b"test WAV"
 assert "--word-timestamps" in sys.argv
+assert "--incremental-loading" in sys.argv
 audio.with_suffix(".json").write_text({json.dumps(REPORT)!r})
+import time
+time.sleep(0.2)
 """)
     cli.chmod(0o700)
     wav = tmp_path / "input.wav"
@@ -79,6 +83,46 @@ time.sleep(30)
     assert response.status_code == 504
     with pytest.raises(ProcessLookupError):
         os.kill(int(pid_file.read_text()), 0)
+
+
+def test_busy_server_does_not_queue_a_second_native_process(tmp_path):
+    from whisperkit_host import serve
+
+    started, release = tmp_path / "started", tmp_path / "release"
+    cli = tmp_path / "argmax-cli"
+    cli.write_text(f"""#!{sys.executable}
+import pathlib, sys, time
+pathlib.Path({str(started)!r}).touch()
+while not pathlib.Path({str(release)!r}).exists():
+    time.sleep(0.02)
+audio = pathlib.Path(sys.argv[sys.argv.index("--audio-path") + 1])
+audio.with_suffix(".json").write_text({json.dumps(REPORT)!r})
+""")
+    cli.chmod(0o700)
+    with serve(cli, tmp_path / "small", port=0, timeout=5) as server:
+        server_thread = threading.Thread(target=server.serve_forever)
+        server_thread.start()
+        url = f"http://127.0.0.1:{server.server_port}/transcribe"
+        responses = []
+
+        def post(timeout):
+            return httpx.post(url, content=b"test WAV", headers={"Content-Type": "audio/wav"},
+                              trust_env=False, timeout=timeout)
+
+        first = threading.Thread(target=lambda: responses.append(post(6)))
+        first.start()
+        try:
+            deadline = time.monotonic() + 3
+            while not started.exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            assert started.exists()
+            assert post(0.5).status_code == 503
+        finally:
+            release.touch()
+            first.join()
+            server.shutdown()
+            server_thread.join()
+    assert responses[0].status_code == 200
 
 
 @pytest.mark.parametrize("response", [httpx.Response(503), httpx.Response(200, json={

@@ -31,6 +31,7 @@ import secrets
 import time
 
 from jsonfile import write_json_atomic
+from transcript_cache import valid_transcript as valid_asr_transcript
 
 CLAIM_FILE = ".remote.json"
 LOG_FILE = ".remote.log"
@@ -542,6 +543,8 @@ def valid_transcript(payload) -> bool:
             or isinstance(duration, bool) or not isinstance(duration, (int, float))):
         return False
     segments = transcript.get("segments")
+    if segments == []:
+        return valid_asr_transcript(transcript)
     return (isinstance(segments, list) and 0 < len(segments) <= MAX_TRANSCRIPT_SEGMENTS
             and all(isinstance(seg, dict) for seg in segments))
 

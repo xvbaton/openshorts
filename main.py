@@ -757,6 +757,17 @@ def _file_stamp(path):
         return None
 
 
+def _source_was_cut(path, *, ranged=False):
+    try:
+        with open(f"{path}.range") as f:
+            stamp = _file_stamp(path)
+            marker = json.load(f)
+            return stamp is not None and (marker == stamp
+                                          or (not ranged and marker == {"cap": stamp}))
+    except (OSError, ValueError):
+        return False
+
+
 def cap_source_duration(input_video, max_minutes, safety=False, start_seconds=0.0):
     """Cut ``input_video`` down to its first ``max_minutes`` minutes, in place.
 
@@ -794,14 +805,8 @@ def cap_source_duration(input_video, max_minutes, safety=False, start_seconds=0.
         start = max(0.0, float(start_seconds or 0))
     except (TypeError, ValueError):
         start = 0.0
-    range_stamp = f"{input_video}.range"
-    if start > 0:
-        try:
-            with open(range_stamp) as f:
-                if json.load(f) == _file_stamp(input_video):
-                    return input_video
-        except (OSError, ValueError):
-            pass
+    if start > 0 and _source_was_cut(input_video, ranged=True):
+        return input_video
     duration = 0.0
     try:
         cap = cv2.VideoCapture(input_video)
@@ -827,13 +832,13 @@ def cap_source_duration(input_video, max_minutes, safety=False, start_seconds=0.
         try:
             subprocess.run(cmd, check=True, capture_output=True, timeout=3600)
             os.replace(tmp, input_video)
+            try:
+                stamp = _file_stamp(input_video)
+                write_json_atomic(f"{input_video}.range", stamp if start else {"cap": stamp})
+            except OSError:
+                pass
             shown = f"{int(math.ceil(duration / 60))}" if duration else "?"
             if start:
-                try:
-                    with open(range_stamp, "w") as f:
-                        json.dump(_file_stamp(input_video), f)
-                except OSError:
-                    pass
                 print(f"✂️ Clipping {start / 60:.1f}-{(start + secs) / 60:.1f} min of {shown}: "
                       f"the part picked in the dashboard.")
             elif safety:
@@ -2851,22 +2856,18 @@ if __name__ == '__main__':
 
     # Quota-wall offer: only the first N minutes were paid for (see
     # cap_source_duration). Must run before anything reads the file.
+    before_cap = _file_stamp(input_video)
     if os.environ.get("MAX_SOURCE_MINUTES", "").strip():
         input_video = cap_source_duration(input_video, os.environ["MAX_SOURCE_MINUTES"],
                                           start_seconds=os.environ.get("SOURCE_START_SECONDS", 0))
     elif os.environ.get("SOURCE_CAP_MINUTES", "").strip():
-        # Whole-video metered job: never process more than was reserved.
-        def _stamp(path):
-            try:
-                st = os.stat(path)
-                return st.st_size, st.st_mtime_ns
-            except OSError:
-                return None
-        _before = _stamp(input_video)
         input_video = cap_source_duration(input_video, os.environ["SOURCE_CAP_MINUTES"],
                                           safety=True)
-        # The cut rewrites the file in place: a new size/mtime means it happened.
-        if _stamp(input_video) != _before and globals().get("early") is not None:
+    if _file_stamp(input_video) != before_cap or _source_was_cut(input_video):
+        if args.transcript:
+            print("⏭️ Source was cut: ignoring the precomputed transcript.")
+            args.transcript = None
+        if globals().get("early") is not None:
             early["invalid"] = True  # its words cover the part that was cut off
 
     if args.prepare_only:
@@ -2943,6 +2944,7 @@ if __name__ == '__main__':
         # to Gemini vision (picks clips from the imagery instead of the speech).
         from transcribe_backends import NoAudioError
         transcript = None
+        transcribed_here = False
         # Module handover (issue #68): another module already transcribed this
         # exact source with the same backend, so reuse its output. Any problem
         # with the file falls back to transcribing normally rather than failing.
@@ -2967,6 +2969,7 @@ if __name__ == '__main__':
                 early_state["transcribed"].wait()
                 if early_state["transcript"] is not None:
                     transcript = early_state["transcript"]
+                    transcribed_here = True
                     print(f"♻️ Using the transcript made while the video downloaded "
                           f"({len(transcript['segments'])} segments).")
                     save_transcript_checkpoint(output_dir, transcript, input_video, duration)
@@ -2976,20 +2979,19 @@ if __name__ == '__main__':
                 print(f"♻️ Reusing the saved transcript "
                       f"({len(transcript['segments'])} segments) — skipping transcription.")
         # Another job already transcribed this very source (download cache).
-        transcript_from_cache = False
         if transcript is None and args.url:
             import source_cache
             transcript = source_cache.fetch_transcript(args.url, duration, input_video)
             if transcript is not None:
-                transcript_from_cache = True
                 save_transcript_checkpoint(output_dir, transcript, input_video, duration)
         if transcript is None:
             try:
                 transcript = transcribe_video(input_video)
+                transcribed_here = True
                 save_transcript_checkpoint(output_dir, transcript, input_video, duration)
             except NoAudioError as e:
                 print(f"🔇 {e} — switching to visual analysis.")
-        if transcript is not None and args.url and not transcript_from_cache:
+        if transcribed_here and args.url:
             # Kept only when this job's source is the cached file, uncut.
             import source_cache
             source_cache.store_transcript(args.url, duration, transcript, input_video)
