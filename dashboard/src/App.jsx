@@ -1007,12 +1007,7 @@ function App() {
     }
   };
 
-  // Hosted is paid-only (no BYOK core). Self-host uses BYOK keys.
-  // `keysMissing` now means "self-host BYOK keys missing" — it never fires on hosted.
-  // A self-hosted server running the moment picker on a local LLM
-  // (LLM_BASE_URL) does not need a Gemini key for the core pipeline.
-  const geminiOk = !!apiKey || !!localLlm;
-  const keysMissing = !billingEnabled && (!geminiOk || !uploadPostKey);
+  const geminiKeyMissing = !billingEnabled && !apiKey && !localLlm;
   const needsPlan = billingEnabled && !isManaged;   // hosted, signed-out or no active plan/trial
 
   // Fresh sign-up: Clip Generator tutorial (AuthContext set os_show_clip_tutorial
@@ -1241,7 +1236,7 @@ function App() {
       // fall through the same gates.
       if (!isSignedIn) { stashPendingJob(data); setShowLogin(true); return; }
       if (!isManaged) { window.location.hash = '#/pricing'; return; }
-    } else if (keysMissing) {
+    } else if (geminiKeyMissing) {
       setShowKeyModal(true);
       return;
     }
@@ -1726,40 +1721,26 @@ function App() {
 
             {/* Hidden below sm: the standing banner underneath already says the
                 same thing, and two warnings in a 360px header is just noise. */}
-            {keysMissing && (
+            {geminiKeyMissing && (
               <button
-                onClick={() => (billingEnabled && !isSignedIn ? setShowLogin(true) : goToTab('settings'))}
+                onClick={() => goToTab('settings')}
                 className="badge-warn hover:brightness-125 transition-all hidden sm:inline-flex"
-                title="Configure API keys or choose a plan"
+                title="Set your Gemini API key"
               >
                 <AlertTriangle size={12} />
-                <span className="hidden md:inline">
-                  {!geminiOk && !uploadPostKey
-                    ? 'Gemini & Upload-Post keys missing'
-                    : !geminiOk
-                      ? 'Gemini API Key Missing'
-                      : 'Upload-Post API Key Missing'}
-                </span>
-                <span className="md:hidden">keys missing</span>
+                <span>Gemini API key missing</span>
               </button>
             )}
           </div>
         </header>
 
         {/* Persistent Missing Keys Banner — visible on every screen */}
-        {keysMissing && activeTab !== 'settings' && (
+        {geminiKeyMissing && activeTab !== 'settings' && (
           <div className="mx-3 sm:mx-6 mt-3 px-3.5 sm:px-4 py-3 bg-paper2 border border-rule rounded-card flex flex-wrap items-center justify-between gap-2.5 sm:gap-4 shrink-0 animate-fade">
             <div className="flex items-start sm:items-center gap-2.5 sm:gap-3 text-sm text-ink2 min-w-0 flex-1">
               <KeyRound size={16} className="shrink-0 text-warn mt-0.5 sm:mt-0" />
               <div className="min-w-0">
-                <span className="font-medium text-ink">Required API keys missing.</span>{' '}
-                <span className="text-muted">
-                  {!geminiOk && !uploadPostKey
-                    ? 'Set your Gemini and Upload-Post API keys to use OpenShorts.'
-                    : !geminiOk
-                      ? 'Set your Gemini API key to use OpenShorts.'
-                      : 'Set your Upload-Post API key to use OpenShorts.'}
-                </span>
+                <span className="text-muted">Set your Gemini API key to generate clips.</span>
               </div>
             </div>
             <button
@@ -1890,7 +1871,7 @@ function App() {
                     </div>
                     <h2 className="text-base font-medium text-ink lowercase">Social Integration</h2>
                   </div>
-                  <span className="badge-warn">Required</span>
+                  <span className="text-xs text-muted">Optional</span>
                 </div>
                 <p className="text-xs text-muted mb-6 leading-relaxed">
                   Required to publish your clips to TikTok, Instagram Reels, and YouTube Shorts via <strong>Upload-Post</strong>.
@@ -2692,14 +2673,10 @@ function App() {
 
       {/* Missing API Key Modal */}
       <Modal
-        isOpen={showKeyModal}
+        isOpen={showKeyModal && geminiKeyMissing}
         onClose={() => setShowKeyModal(false)}
         eyebrow="SETUP"
-        title={!geminiOk && !uploadPostKey
-          ? 'Required API Keys Missing'
-          : !geminiOk
-            ? 'Gemini API Key Required'
-            : 'Upload-Post API Key Required'}
+        title="Gemini API Key Required"
         footer={
           <div className="flex gap-3">
             <button
@@ -2719,67 +2696,20 @@ function App() {
       >
         <div className="space-y-4">
           <p className="text-sm text-muted">
-            OpenShorts needs both a <strong className="text-ink2">Gemini</strong> API key and an <strong className="text-ink2">Upload-Post</strong> API key. Both have free tiers.
+            Create a Gemini API key in <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" className="text-brass underline">Google AI Studio</a>, then paste it below and press Enter.
           </p>
-
-          {/* Gemini block */}
-          <div className={`rounded-input p-4 space-y-2 border ${!apiKey ? 'border-rule2' : 'border-rule opacity-70'}`}>
-            <p className="text-xs font-medium text-ink flex items-center gap-2">
-              {apiKey ? <Check size={12} className="text-ok" /> : <AlertTriangle size={12} className="text-warn" />}
-              Gemini API Key {apiKey && <span className="text-ok">— set</span>}
-            </p>
-            {!apiKey && (
-              <>
-                <ol className="text-xs text-muted space-y-1 list-decimal list-inside">
-                  <li>Go to <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" className="text-brass underline">aistudio.google.com/app/apikey</a></li>
-                  <li>Sign in with your Google account</li>
-                  <li>Click "Create API Key"</li>
-                  <li>Copy the key and paste it below</li>
-                </ol>
-                <input
-                  type="text"
-                  placeholder="Paste your Gemini API key here..."
-                  className="input-field"
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && e.target.value.trim()) {
-                      setApiKey(e.target.value.trim());
-                    }
-                  }}
-                />
-              </>
-            )}
-          </div>
-
-          {/* Upload-Post block */}
-          <div className={`rounded-input p-4 space-y-2 border ${!uploadPostKey ? 'border-rule2' : 'border-rule opacity-70'}`}>
-            <p className="text-xs font-medium text-ink flex items-center gap-2">
-              {uploadPostKey ? <Check size={12} className="text-ok" /> : <AlertTriangle size={12} className="text-warn" />}
-              Upload-Post API Key {uploadPostKey && <span className="text-ok">— set</span>}
-            </p>
-            {!uploadPostKey && (
-              <>
-                <p className="text-xs text-muted">
-                  Required to publish your clips to TikTok, Instagram Reels, and YouTube Shorts. Free tier available, no credit card needed.
-                </p>
-                <ol className="text-xs text-muted space-y-1 list-decimal list-inside">
-                  <li>Register at <a href="https://app.upload-post.com/login" target="_blank" rel="noopener noreferrer" className="text-brass underline">app.upload-post.com</a></li>
-                  <li>Connect your TikTok, Instagram, or YouTube accounts</li>
-                  <li>Go to <a href="https://app.upload-post.com/api-keys" target="_blank" rel="noopener noreferrer" className="text-brass underline">API Keys</a> and generate one</li>
-                  <li>Paste it below</li>
-                </ol>
-                <input
-                  type="text"
-                  placeholder="Paste your Upload-Post API key here..."
-                  className="input-field"
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && e.target.value.trim()) {
-                      setUploadPostKey(e.target.value.trim());
-                    }
-                  }}
-                />
-              </>
-            )}
-          </div>
+          <input
+            type="password"
+            aria-label="Gemini API key"
+            placeholder="Paste your Gemini API key"
+            className="input-field"
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && e.target.value.trim()) {
+                setApiKey(e.target.value.trim());
+                setShowKeyModal(false);
+              }
+            }}
+          />
         </div>
       </Modal>
 
