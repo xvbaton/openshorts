@@ -174,6 +174,19 @@ def test_same_size_replacement_cannot_reuse_or_poison_cached_transcript(tmp_path
     assert source_cache.fetch_transcript(URL, 600, path) == TRANSCRIPT
 
 
+def test_cpu_fallback_does_not_fill_the_shared_native_cache(tmp_path, monkeypatch):
+    _, path = _download(tmp_path)
+    assert source_cache.store(URL, path, "Some Title")
+    monkeypatch.setenv("TRANSCRIBE_BACKEND", "whisperkit")
+    monkeypatch.setenv("WHISPERKIT_MODEL", "openai_whisper-small")
+    assert not source_cache.store_transcript(URL, 600, TRANSCRIPT, path)
+    native = {**TRANSCRIPT, "metadata": {"backend": "whisperkit", "model": "openai_whisper-small"}}
+    assert source_cache.store_transcript(URL, 600, native, path)
+    assert source_cache.fetch_transcript(URL, 600, path) == native
+    monkeypatch.setenv("WHISPERKIT_MODEL", "openai_whisper-base")
+    assert source_cache.fetch_transcript(URL, 600, path) is None
+
+
 def test_a_cut_source_does_not_store_its_transcript(tmp_path):
     job, path = _download(tmp_path)
     source_cache.store(URL, path, "Some Title")

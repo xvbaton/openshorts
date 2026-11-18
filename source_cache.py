@@ -283,8 +283,11 @@ def store(url, path, title):
 
 def _asr_profile():
     from subtitles import get_whisper_config
-    return {"backend": os.environ.get("TRANSCRIBE_BACKEND", "whisper").strip().lower(),
-            "whisper": get_whisper_config()}
+    backend = os.environ.get("TRANSCRIBE_BACKEND", "whisper").strip().lower()
+    if backend == "whisperkit":
+        model = os.environ.get("WHISPERKIT_MODEL", "").strip()
+        return {"backend": backend, "model": model} if model else None
+    return {"backend": backend, "whisper": get_whisper_config()}
 
 
 def fetch_transcript(url, duration, source_path):
@@ -293,13 +296,16 @@ def fetch_transcript(url, duration, source_path):
     A job that cut or replaced its source gets a cache miss."""
     if not enabled():
         return None
+    profile = _asr_profile()
+    if profile is None:
+        return None
     vid = video_id(url)
     if not vid or _entry(vid) is None:
         return None
     data = _read_json(_paths(vid)[3])
     try:
         if (not data or data.get("version") != SCHEMA_VERSION
-                or data.get("profile") != _asr_profile()
+                or data.get("profile") != profile
                 or not abs(float(data.get("duration")) - float(duration)) <= 0.5):
             return None
         t = data.get("transcript")
@@ -315,6 +321,14 @@ def store_transcript(url, duration, transcript, source_path):
     """Keep the transcript next to the cached source, if ``source_path`` is it."""
     if not enabled() or not valid_transcript(transcript):
         return False
+    profile = _asr_profile()
+    if profile is None:
+        return False
+    if profile["backend"] == "whisperkit":
+        metadata = transcript.get("metadata")
+        if (not isinstance(metadata, dict) or metadata.get("backend") != "whisperkit"
+                or metadata.get("model") != profile["model"]):
+            return False
     vid = video_id(url)
     if not vid:
         return False
@@ -326,7 +340,7 @@ def store_transcript(url, duration, transcript, source_path):
         digest = media_sha256(source_path)
         if not os.path.samefile(media, source_path) and digest != media_sha256(media):
             return False
-        _write_json(_paths(vid)[3], {"profile": _asr_profile(), "duration": float(duration),
+        _write_json(_paths(vid)[3], {"profile": profile, "duration": float(duration),
                                    "sha256": digest, "version": SCHEMA_VERSION,
                                    "transcript": transcript})
         return True

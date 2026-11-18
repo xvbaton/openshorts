@@ -1,4 +1,4 @@
-"""Transcription backends: NVIDIA Parakeet (onnx-asr) with faster-whisper fallback.
+"""Transcription backends: faster-whisper, NVIDIA Parakeet, macOS WhisperKit.
 
 Every caller goes through transcribe_media(), which returns the transcript
 contract the whole pipeline depends on:
@@ -18,7 +18,7 @@ Invariants the consumers rely on (clip cutting, karaoke subtitles, Remotion):
   - all numerics are native Python floats (json.dump of the transcript).
   - words sorted by start, segments chronological, absolute file timestamps.
 
-TRANSCRIBE_BACKEND env: "whisper" (default) | "parakeet".
+TRANSCRIBE_BACKEND env: "whisper" (default) | "parakeet" | "whisperkit".
 The parakeet path falls back to whisper automatically when the model errors,
 produces no usable words, or the detected language is outside its 25
 supported European languages (e.g. Japanese/Chinese/Arabic uploads).
@@ -38,6 +38,7 @@ from subtitles import (
     WHISPER_TRANSCRIBE_PARAMS,
     merge_continuation_words,
 )
+from transcript_cache import valid_transcript
 
 PARAKEET_MODEL_ID = "nemo-parakeet-tdt-0.6b-v3"
 
@@ -222,7 +223,7 @@ def whisper_cpu_threads():
     return n if n > 0 else max(1, min(8, os.cpu_count() or 1))
 
 
-def _get_whisper_model():
+def _get_whisper_model(*, force_cpu=False):
     """Process-wide WhisperModel singleton, rebuilt if the env config changes.
 
     Keeping the model resident avoids a full reload per transcription (which
@@ -230,7 +231,7 @@ def _get_whisper_model():
     """
     global _whisper_model, _whisper_key
     cfg = get_whisper_config()
-    if _whisper_force_cpu:
+    if force_cpu or _whisper_force_cpu:
         cfg["device"] = "cpu"
         cfg["compute_type"] = "int8"
     key = (cfg["model_size"], cfg["device"], cfg["compute_type"])
@@ -248,18 +249,18 @@ def _whisper_device():
     return "cpu" if _whisper_force_cpu else get_whisper_config()["device"]
 
 
-def _run_whisper_once(media_path, **params):
-    if _whisper_force_cpu:
+def _run_whisper_once(media_path, *, force_cpu=False, **params):
+    if force_cpu or _whisper_force_cpu:
         # Off the card for good in this process: the host slot only guards
         # the GPU, and holding it through a CPU decode starves every job
         # that would transcribe on the card in seconds.
         release_host_slot()
-    gate = _ASR_GATE if _whisper_device() != "cpu" else _NULL_GATE
+    gate = _ASR_GATE if not force_cpu and _whisper_device() != "cpu" else _NULL_GATE
     # The model is fetched inside the gate: release_models() drains the gate
     # before unloading, so a transcription can never start on a model that is
     # being dropped underneath it.
     with gate:
-        model, _device = _get_whisper_model()
+        model, _device = _get_whisper_model(force_cpu=True) if force_cpu else _get_whisper_model()
         segments, info = model.transcribe(media_path, **params)
         progress = _TranscribeProgress(getattr(info, "duration", 0))
         materialized = []
@@ -272,7 +273,7 @@ def _run_whisper_once(media_path, **params):
         return materialized, info
 
 
-def run_whisper_transcription(media_path, **params):
+def run_whisper_transcription(media_path, *, force_cpu=False, **params):
     """Transcribe and FULLY materialize the segments inside the GPU gate.
 
     faster-whisper returns a lazy generator — decoding happens while
@@ -285,9 +286,9 @@ def run_whisper_transcription(media_path, **params):
     """
     global _whisper_model, _whisper_force_cpu
     try:
-        return _run_whisper_once(media_path, **params)
+        return _run_whisper_once(media_path, force_cpu=force_cpu, **params)
     except RuntimeError as e:
-        if _whisper_force_cpu or "cuda" not in str(e).lower():
+        if force_cpu or _whisper_force_cpu or "cuda" not in str(e).lower():
             raise
         print(f"⚠️ [ASR] whisper GPU failed ({e}) — retrying on CPU", flush=True)
         _whisper_force_cpu = True
@@ -296,14 +297,16 @@ def run_whisper_transcription(media_path, **params):
         return _run_whisper_once(media_path, **params)
 
 
-def _transcribe_with_whisper(media_path):
-    segments, info = run_whisper_transcription(media_path, **WHISPER_TRANSCRIBE_PARAMS)
+def _transcribe_with_whisper(media_path, *, force_cpu=False):
+    segments, info = run_whisper_transcription(
+        media_path, force_cpu=force_cpu, **WHISPER_TRANSCRIBE_PARAMS)
 
     out_segments = []
     text_parts = []
     for segment in segments:
         words = [
-            {"word": w.word, "start": float(w.start), "end": float(w.end)}
+            {"word": w.word, "start": float(w.start), "end": float(w.end),
+             "probability": getattr(w, "probability", None)}
             for w in (segment.words or [])
         ]
         out_segments.append({
@@ -311,14 +314,54 @@ def _transcribe_with_whisper(media_path):
             "end": float(segment.end),
             "text": segment.text,
             "words": merge_continuation_words(words),
+            **{name: getattr(segment, name) for name in (
+                "id", "seek", "tokens", "temperature", "avg_logprob",
+                "compression_ratio", "no_speech_prob",
+            ) if hasattr(segment, name)},
         })
         text_parts.append(segment.text.strip())
 
+    config = get_whisper_config()
+    if force_cpu or _whisper_force_cpu:
+        config.update(device="cpu", compute_type="int8")
     return {
         "text": " ".join(part for part in text_parts if part),
         "language": info.language,
         "segments": out_segments,
+        "metadata": {
+            "backend": "faster-whisper", **config,
+            **{name: getattr(info, name) for name in (
+                "duration", "duration_after_vad", "language_probability",
+                "all_language_probs",
+            ) if hasattr(info, name)},
+        },
     }
+
+
+def _transcribe_with_whisperkit(media_path):
+    import httpx
+
+    url = os.environ.get("WHISPERKIT_URL", "http://host.docker.internal:50060/transcribe")
+    wav_path = _extract_wav(media_path)
+    try:
+        with open(wav_path, "rb") as wav, httpx.Client(
+            timeout=httpx.Timeout(660, connect=5), trust_env=False
+        ) as client:
+            response = client.post(url, content=iter(lambda: wav.read(128 * 1024), b""),
+                                   headers={"Content-Type": "audio/wav",
+                                            "Content-Length": str(os.fstat(wav.fileno()).st_size)})
+            response.raise_for_status()
+            transcript = response.json()
+    finally:
+        os.unlink(wav_path)
+    if not valid_transcript(transcript) or any(
+        segment["text"].strip() and not segment["words"] for segment in transcript["segments"]
+    ):
+        raise ValueError("WhisperKit report has invalid or missing word timestamps")
+    expected_model = os.environ.get("WHISPERKIT_MODEL", "").strip()
+    if expected_model and transcript.get("metadata", {}).get("model") != expected_model:
+        raise ValueError("WhisperKit served a different model")
+    return transcript
 
 
 # --- parakeet ---------------------------------------------------------------
@@ -554,15 +597,19 @@ def release_models():
 
 
 def _extract_wav(media_path):
-    """Parakeet wants 16kHz mono PCM wav; ffmpeg-extract to a temp file."""
+    """Extract 16 kHz mono PCM for Parakeet and WhisperKit."""
     fd, wav_path = tempfile.mkstemp(suffix=".wav", prefix="asr_")
     os.close(fd)
     cmd = [
         "ffmpeg", "-y", "-loglevel", "error", "-i", media_path,
         "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", wav_path,
     ]
-    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL,
-                   stderr=subprocess.PIPE, timeout=1800)
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.PIPE, timeout=1800)
+    except BaseException:
+        os.unlink(wav_path)
+        raise
     return wav_path
 
 
@@ -847,6 +894,13 @@ def transcribe_media(media_path):
             "speech, so it needs a video with audio.")
 
     backend = os.environ.get("TRANSCRIBE_BACKEND", "whisper").strip().lower()
+
+    if backend == "whisperkit":
+        try:
+            return _transcribe_with_whisperkit(media_path)
+        except Exception as e:
+            print(f"⚠️ [ASR] WhisperKit failed ({type(e).__name__}) — falling back to CPU whisper")
+            return _transcribe_with_whisper(media_path, force_cpu=True)
 
     if backend == "parakeet":
         try:
