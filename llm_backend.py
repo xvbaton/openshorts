@@ -24,13 +24,16 @@ so ``main.py`` sees one shape regardless of provider.
 from __future__ import annotations
 
 import json
+import math
 import os
+import time
 from typing import Optional, Tuple, Type
 
 import httpx
 from pydantic import BaseModel
 
 DEFAULT_MODEL = "llama3.1:8b"
+QWEN_MODEL = "qwen3.5:4b"
 DEFAULT_TIMEOUT = 600.0  # local models on CPU are slow; a scoring batch can take minutes
 
 
@@ -49,7 +52,18 @@ def base_url() -> str:
 
 
 def model_name() -> str:
-    return (os.environ.get("LLM_MODEL") or "").strip() or DEFAULT_MODEL
+    configured = (os.environ.get("LLM_MODEL") or "").strip()
+    if _ollama_provider() and configured in ("", "qwen3.5"):
+        return QWEN_MODEL
+    return configured or DEFAULT_MODEL
+
+
+def _ollama_provider() -> bool:
+    return os.environ.get("LLM_PROVIDER", "").strip().lower() == "ollama"
+
+
+def uses_qwen(model: str) -> bool:
+    return _ollama_provider() and model == QWEN_MODEL
 
 
 def active() -> bool:
@@ -66,7 +80,8 @@ def describe() -> Optional[dict]:
 
 def _timeout() -> float:
     try:
-        return float(os.environ.get("LLM_TIMEOUT") or DEFAULT_TIMEOUT)
+        seconds = float(os.environ.get("LLM_TIMEOUT") or DEFAULT_TIMEOUT)
+        return seconds if math.isfinite(seconds) and seconds > 0 else DEFAULT_TIMEOUT
     except ValueError:
         return DEFAULT_TIMEOUT
 
@@ -80,7 +95,49 @@ def _headers() -> dict:
 
 def _client(**kwargs) -> httpx.Client:
     """Factory so tests can swap in ``httpx.MockTransport``."""
-    return httpx.Client(timeout=_timeout(), **kwargs)
+    return httpx.Client(**kwargs)
+
+
+def qwen_options(scoring):
+    think = scoring and os.environ.get("LLM_SCORE_THINK") == "1"
+    default = (1024 if think else 384) if scoring else 1536
+    name = "LLM_SCORE_MAX_TOKENS" if scoring else "LLM_DETAIL_MAX_TOKENS"
+    try:
+        limit = int(os.environ.get(name, default))
+    except ValueError:
+        limit = default
+    return think, {"num_predict": max(1, min(limit, 2048)), "num_ctx": 4096,
+                   "temperature": 0, "seed": 42}
+
+
+def _ollama_chat(client, model, messages, schema, scoring):
+    think, options = qwen_options(scoring)
+    url = f"{base_url().removesuffix('/v1')}/api/chat"
+    started = time.monotonic()
+    print(f"   [LLM] requested={model} stage={'score' if scoring else 'detail'} "
+          f"think={think} max_tokens={options['num_predict']}", flush=True)
+    response = client.post(url, headers=_headers(), json={
+        "model": model, "messages": messages, "stream": False, "think": think,
+        "options": options, "format": schema.model_json_schema(),
+    })
+    response.raise_for_status()
+    data = response.json()
+    served = data.get("model")
+    message = data.get("message") or {}
+    elapsed = time.monotonic() - started
+    print(f"   [LLM] requested={model} served={served} elapsed={elapsed:.2f}s "
+          f"input_tokens={data.get('prompt_eval_count')} output_tokens={data.get('eval_count')} "
+          f"reasoning_present={bool(message.get('thinking'))} "
+          f"done_reason={data.get('done_reason')}", flush=True)
+    if served != model:
+        raise RuntimeError(f"LLM model mismatch: requested={model} served={served}")
+    if not data.get("done") or data.get("done_reason") == "length":
+        raise RuntimeError(f"LLM output limit or incomplete response for {model}")
+    # Use the same parsing/accounting path as OpenAI-compatible responses.
+    return {"model": served, "choices": [{"message": message}], "usage": {
+        "prompt_tokens": data.get("prompt_eval_count"),
+        "completion_tokens": data.get("eval_count"),
+    }}
 
 
 def _response_formats(schema: Type[BaseModel]):
@@ -116,26 +173,15 @@ def generate_json(prompt: str, schema: Type[BaseModel], model: Optional[str] = N
         {"role": "system", "content": "You answer with a single JSON object and nothing else."},
         {"role": "user", "content": prompt},
     ]
-    last_rejection: Optional[str] = None
-    with _client() as client:
-        for fmt in _response_formats(schema):
-            body = {"model": model, "messages": messages, "temperature": 0.2, "stream": False}
-            if fmt is not None:
-                body["response_format"] = fmt
-            resp = client.post(url, json=body, headers=_headers())
-            if fmt is not None and _is_format_rejection(resp):
-                # The server does not know this response_format flavour; the
-                # next loop iteration asks for a looser one.
-                last_rejection = resp.text[:200]
-                continue
-            if resp.status_code >= 400:
-                raise RuntimeError(
-                    f"LLM server {resp.status_code} from {url}: {resp.text[:300]}")
-            data = resp.json()
-            break
+    native = uses_qwen(model)
+    timeout = httpx.Timeout(_timeout(), connect=10.0, write=30.0, pool=10.0)
+    with _client(timeout=timeout) as client:
+        if native:
+            data = _ollama_chat(client, model, messages, schema,
+                                scoring=schema is gemini_worker.ScoreResponse)
         else:
-            raise RuntimeError(
-                f"LLM server rejected every response_format variant: {last_rejection}")
+            data = _compatible_chat(client, url, model, messages, schema)
+            print(f"   [LLM] requested={model} served={data.get('model') or 'unreported'}")
 
     choices = data.get("choices") or []
     text = ""
@@ -145,9 +191,6 @@ def generate_json(prompt: str, schema: Type[BaseModel], model: Optional[str] = N
         if isinstance(text, list):  # some servers return content parts
             text = "".join(p.get("text", "") for p in text if isinstance(p, dict))
     parsed = gemini_worker._parse_json_response_text(text)
-    # Validate against the same schema Gemini enforces server-side, so a
-    # local model that drops a field fails here with a readable error
-    # (retried by the caller) instead of deep inside the clip pipeline.
     validated = schema.model_validate(parsed).model_dump()
 
     usage = data.get("usage") or {}
@@ -163,3 +206,23 @@ def generate_json(prompt: str, schema: Type[BaseModel], model: Optional[str] = N
         "local": True,
     }
     return validated, cost
+
+
+def _compatible_chat(client, url, model, messages, schema):
+    last_rejection = None
+    for fmt in _response_formats(schema):
+        body = {"model": model, "messages": messages, "temperature": 0.2, "stream": False}
+        if fmt is not None:
+            body["response_format"] = fmt
+        resp = client.post(url, json=body, headers=_headers())
+        if fmt is not None and _is_format_rejection(resp):
+            # The server does not know this response_format flavour; the
+            # next loop iteration asks for a looser one.
+            last_rejection = resp.text[:200]
+            continue
+        if resp.status_code >= 400:
+            raise RuntimeError(
+                f"LLM server {resp.status_code} from {url}: {resp.text[:300]}")
+        return resp.json()
+    raise RuntimeError(
+        f"LLM server rejected every response_format variant: {last_rejection}")

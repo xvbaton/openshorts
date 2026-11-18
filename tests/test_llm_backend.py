@@ -130,7 +130,7 @@ def test_stage_routes_to_local_backend_and_retries_transient(local, monkeypatch)
     def fake_generate(prompt, schema, model=None):
         calls["n"] += 1
         if calls["n"] == 1:
-            raise httpx.ConnectError("ConnectError: connection refused")
+            raise httpx.ReadTimeout("timed out")
         return {"windows": [{"id": "w0", "start": 0, "end": 1, "score": 50, "reason": ""}]}, {"total_cost": 0.0}
 
     monkeypatch.setattr(llm_backend, "generate_json", fake_generate)
@@ -149,3 +149,46 @@ def test_score_batch_shrinks_for_local_models(local, monkeypatch):
     monkeypatch.delenv("LLM_BASE_URL")
     monkeypatch.delenv("LLM_SCORE_BATCH")
     assert main.score_batch_size() == 8
+
+
+def test_ollama_pins_qwen_variant_and_bounds_scoring(monkeypatch, capsys):
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    monkeypatch.setenv("LLM_BASE_URL", "http://llm.test/v1")
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+    monkeypatch.setenv("LLM_SCORE_THINK", "1")
+    monkeypatch.setenv("LLM_SCORE_MAX_TOKENS", "768")
+    monkeypatch.setenv("LLM_TIMEOUT", "120")
+
+    def handler(request):
+        body = json.loads(request.content)
+        assert request.url.path == "/api/chat"
+        assert request.extensions["timeout"] == {"connect": 10, "read": 120, "write": 30, "pool": 10}
+        assert body["model"] == "qwen3.5:4b"
+        assert body["think"] is True and body["options"]["num_predict"] == 768
+        return httpx.Response(200, json={
+            "model": "qwen3.5:4b", "done": True, "done_reason": "stop",
+            "message": {"content": '{"windows":[]}', "thinking": "reason"},
+            "prompt_eval_count": 12, "eval_count": 8,
+        })
+
+    _serve(handler, monkeypatch)
+    parsed, cost = llm_backend.generate_json("prompt", gemini_worker.ScoreResponse)
+    assert parsed == {"windows": []}
+    assert (cost["input_tokens"], cost["output_tokens"]) == (12, 8)
+    assert "requested=qwen3.5:4b served=qwen3.5:4b" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("served, reason, error", [
+    ("qwen3.5:latest", "stop", "model mismatch"),
+    (None, "stop", "model mismatch"),
+    ("qwen3.5:4b", "length", "output limit"),
+])
+def test_ollama_rejects_substitution_and_truncation(local, monkeypatch, served, reason, error):
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    monkeypatch.setenv("LLM_MODEL", "qwen3.5:4b")
+    _serve(lambda r: httpx.Response(200, json={
+        "model": served, "done": True, "done_reason": reason,
+        "message": {"content": '{"windows":[]}'},
+    }), monkeypatch)
+    with pytest.raises(RuntimeError, match=error):
+        llm_backend.generate_json("prompt", gemini_worker.ScoreResponse)

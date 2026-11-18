@@ -14,6 +14,7 @@ from scenedetect import open_video, SceneManager
 from scenedetect.detectors import ContentDetector
 from ultralytics import YOLO
 import torch
+import httpx
 import os
 import math
 import numpy as np
@@ -2166,6 +2167,10 @@ def transcribe_video(video_path, slot_timeout=None):
 
     return transcript
 
+class TransientLLMError(RuntimeError):
+    pass
+
+
 def _run_gemini_stage(client, model_name, prompt, schema):
     """One schema-enforced model call with transient-error backoff.
     Returns (parsed_dict, cost_analysis).
@@ -2205,20 +2210,29 @@ def _run_gemini_stage(client, model_name, prompt, schema):
             raise  # deterministic policy block — never retry
         except Exception as e:
             msg = str(e)
-            transient = any(tok in msg for tok in (
+            transient = (use_local and (
+                isinstance(e, (httpx.TimeoutException, httpx.NetworkError,
+                               httpx.RemoteProtocolError))
+                or (isinstance(e, httpx.HTTPStatusError)
+                    and e.response.status_code in (429, 500, 502, 503, 504))
+            )) or any(tok in msg for tok in (
                 '503', 'UNAVAILABLE', '429', 'RESOURCE_EXHAUSTED',
                 '500', 'INTERNAL', 'overloaded', 'Deadline',
                 'empty response body', 'did not contain a JSON object',
                 'Failed to parse Gemini JSON response',
                 # OpenAI-compatible servers: model still loading, busy, or a
                 # small model that skipped a required field this time.
-                'ConnectError', 'ReadTimeout', 'RemoteProtocolError', '502', '504',
+                '502', '504',
                 'validation error'))
-            if attempt == max_attempts or not transient:
+            if not transient:
+                raise
+            if attempt == max_attempts:
+                if use_local:
+                    raise TransientLLMError(f"Transient LLM error: {type(e).__name__}: {msg}") from e
                 raise
             wait = 5 * (2 ** (attempt - 1))
             who = "LLM server" if use_local else "Gemini"
-            print(f"⚠️ {who} transient error (attempt {attempt}/{max_attempts}), retrying in {wait}s: {msg[:150]}")
+            print(f"⚠️ {who} transient error (attempt {attempt}/{max_attempts}), retrying in {wait}s: {type(e).__name__}: {msg[:150]}")
             time.sleep(wait)
 
 
