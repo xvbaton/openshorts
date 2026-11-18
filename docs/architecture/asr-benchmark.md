@@ -65,12 +65,27 @@ Le volume Hugging Face est dédié au benchmark. Relever le temps total et, pour
 4. Produire une transcription humaine de référence. Calculer le taux d’erreur de mots `(substitutions + suppressions + insertions) / mots de référence`, avec la même normalisation pour les deux sorties (casse, ponctuation, espaces, accents conservés). Si l’annotation intégrale coûte trop cher, figer trois extraits continus de 60 s au début, au milieu et à la fin, et rendre le périmètre explicite.
 5. Annoter au moins 30 mots répartis dans ces extraits, avec leur début et leur fin réels sur la forme d’onde. Inclure des débuts après silence, des fins de phrase et du gameplay sous la voix. Pour chaque moteur, renseigner la part de mots retrouvés, puis la médiane et le 90e percentile des erreurs absolues de début et de fin pour les mots alignés. Écouter cinq coupes aux bornes détectées et relever les mots tronqués.
 
-| Mesure | CPU historique | CPU sur ce commit | WhisperKit GPU natif |
+## Résultats Zelda mesurés
+
+MacBook Pro M1 Pro, 16 Gio, macOS 27.2.1. Docker 29.8.2, Linux arm64, 10 CPU et 7,75 Gio alloués. La copie de référence de 734,49 s correspond par SHA-256 aux deux fichiers de l’installation OpenShorts. WhisperKit utilise le CLI Argmax v1.1.1 et `openai_whisper-small` à la révision `0f63a780`. Les mesures d’origine concernent le commit `2948763`.
+
+| Passage | Durée de bout en bout | Mémoire libre avant / min. / après | Swap utilisé avant → après |
 |---|---:|---:|---:|
-| Temps de transcription Zelda | ≈ 700 s au compteur ASR | À mesurer | À mesurer |
-| Taux d’erreur de mots | — | À mesurer | À mesurer |
-| Couverture et erreur p90 des timestamps | — | À mesurer | À mesurer |
-| Pression mémoire et swap ajouté | — | À mesurer | À mesurer |
+| WhisperKit 1, trace Core ML | 170,73 s | 38 % / 29 % / 50 % | 3 256 → 4 588 Mio |
+| WhisperKit 2, trace Metal de 12 s | 156,12 s | 53 % / 34 % / 54 % | 4 564 → 4 578 Mio |
+| WhisperKit 3, sans trace | 154,31 s | 54 % / 45 % / 56 % | 4 578 → 4 474 Mio |
+| Reprise du JSON WhisperKit 1 | 4,51 s | 47 % / 47 % / 55 % | 4 580 → 4 564 Mio |
+| faster-whisper CPU int8, passage complet | 931,48 s | 56 % / 28 % / 36 % | 4 474 → 3 377 Mio |
+
+La médiane WhisperKit est de **156,12 s** de bout en bout et **150,18 s** dans le processus natif. Les trois passages ont produit un résultat `whisperkit`, sans repli CPU. La comparaison au passage CPU complet donne **5,97×** sur cette vidéo. Le compteur ASR CPU a indiqué 909 s. Le passage CPU 2 a été arrêté sur demande après le jalon de 50 % à 526 s. Aucun troisième passage CPU n’a démarré.
+
+La première trace Core ML était inexploitable à l’export. La trace Metal du passage 2 montre **9 346 intervalles Compute actifs** attribués au PID `argmax-cli` sur le GPU M1 Pro et un pic d’allocation Metal de **998 Mio** sur l’échantillon de 12 s. Les trois PID natifs avaient disparu à la fin de leurs passages. Le pic de mémoire résidente échantillonnée était de **933 Mio**. Le swap et l’indicateur de mémoire libre sont des mesures système. Le premier passage instrumenté a ajouté **1 332 Mio de swap utilisé** au relevé après passage.
+
+La reprise a conservé l’empreinte et la date de modification du fichier JSON, sans lancer de processus natif. Les trois JSON bruts contiennent le même texte, les mêmes 233 segments et les mêmes **2 988 mots horodatés**. L’analyse a relevé 10 chevauchements de frontières, dont un de 4,58 s entre la fin d’un mot et le début du suivant, et trois reculs du début d’un mot, jusqu’à 1,24 s.
+
+Le rejeu de la normalisation sur les trois JSON a éliminé ces chevauchements et reculs en conservant tous les mots, leur ordre et leurs métadonnées. Les bornes modifiées conservent les valeurs brutes dans `raw_start` et `raw_end`. Les 11 mots dont les bornes étaient égales restent signalés par une durée nulle. La précision acoustique et le taux d’erreur de mots restent à mesurer sur une annotation humaine. Ce rejeu a utilisé uniquement les JSON enregistrés.
+
+Les mesures, logs, JSON bruts, copie normalisée et trace Metal sont conservés dans `.cache/asr-benchmark/`. L’installation OpenShorts est restée intacte. Les conteneurs de benchmark étaient temporaires.
 
 Le JSON versionné `.transcript_checkpoint.json` reste dans le dossier du job après la fin et suit la rétention de ce dossier. La reprise vérifie la source par SHA-256 et la structure des timestamps. Une copie du même fichier peut réutiliser le transcript. Un nouvel upload local créant un autre job a son propre dossier. Un ancien JSON sans empreinte entraîne un nouveau passage ASR. Pour comparer deux moteurs, utiliser deux dossiers, car un transcript valide reste réutilisable pour ce job même si le moteur configuré change.
 

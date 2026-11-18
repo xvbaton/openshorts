@@ -46,7 +46,8 @@ import shutil
 import tempfile
 import time
 from urllib.parse import parse_qs, urlparse
-from transcript_cache import SCHEMA_VERSION, media_sha256, valid_transcript
+from transcript_cache import (SCHEMA_VERSION, media_sha256, normalize_whisperkit_timestamps,
+                              valid_transcript)
 
 _ID = re.compile(r"^[A-Za-z0-9_-]{11}$")
 _HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com",
@@ -312,7 +313,7 @@ def fetch_transcript(url, duration, source_path):
         if not valid_transcript(t) or data.get("sha256") != media_sha256(source_path):
             return None
         print(f"♻️ Transcript reused from the download cache ({vid}).")
-        return t
+        return normalize_whisperkit_timestamps(t)
     except (OSError, TypeError, ValueError):
         return None
 

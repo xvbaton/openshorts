@@ -38,7 +38,7 @@ from subtitles import (
     WHISPER_TRANSCRIBE_PARAMS,
     merge_continuation_words,
 )
-from transcript_cache import valid_transcript
+from transcript_cache import normalize_whisperkit_timestamps, valid_transcript
 
 PARAKEET_MODEL_ID = "nemo-parakeet-tdt-0.6b-v3"
 
@@ -361,7 +361,7 @@ def _transcribe_with_whisperkit(media_path):
     expected_model = os.environ.get("WHISPERKIT_MODEL", "").strip()
     if expected_model and transcript.get("metadata", {}).get("model") != expected_model:
         raise ValueError("WhisperKit served a different model")
-    return transcript
+    return normalize_whisperkit_timestamps(transcript)
 
 
 # --- parakeet ---------------------------------------------------------------

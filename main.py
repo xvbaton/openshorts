@@ -42,7 +42,8 @@ from ffmpeg_utils import (video_encode_args, audio_encode_args, cut_clip, QUALIT
 from dotenv import load_dotenv
 import json
 from jsonfile import write_json_atomic
-from transcript_cache import SCHEMA_VERSION, media_sha256, valid_transcript
+from transcript_cache import (SCHEMA_VERSION, media_sha256, normalize_whisperkit_timestamps,
+                              valid_transcript)
 
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning, module='google.protobuf')
@@ -2044,7 +2045,7 @@ def load_transcript_checkpoint(output_dir, input_video, duration):
         transcript = payload.get("transcript") or {}
         if not valid_transcript(transcript):
             raise ValueError("invalid transcript or timestamps")
-        return transcript
+        return normalize_whisperkit_timestamps(transcript)
     except Exception as e:
         print(f"⚠️ Ignoring unusable transcript checkpoint ({e}).")
         return None
@@ -2954,6 +2955,8 @@ if __name__ == '__main__':
                     transcript = json.load(f)
                 if not transcript.get('segments'):
                     raise ValueError("transcript has no segments")
+                if valid_transcript(transcript):
+                    normalize_whisperkit_timestamps(transcript)
                 print(f"⏩ Reusing precomputed transcript "
                       f"({len(transcript['segments'])} segments) — skipping transcription.")
                 save_transcript_checkpoint(output_dir, transcript, input_video, duration)

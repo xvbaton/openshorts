@@ -52,6 +52,22 @@ class TestRoundTrip:
     def test_missing_checkpoint_is_none(self, tmp_path):
         assert _load(tmp_path) is None
 
+    def test_reuse_repairs_whisperkit_boundaries_without_rewriting_json(self, tmp_path):
+        transcript = {**TRANSCRIPT, "segments": [
+            {"start": 0, "end": 3, "text": "hola", "words": [
+                {"word": " hola", "start": 1, "end": 3},
+            ]},
+            {"start": 2, "end": 4, "text": "sí", "words": [
+                {"word": " sí", "start": 2, "end": 4},
+            ]},
+        ]}
+        _save(tmp_path, transcript=transcript)
+        saved = tmp_path / main.TRANSCRIPT_CHECKPOINT
+        before = saved.read_bytes()
+        previous, following = _load(tmp_path)["segments"]
+        assert previous["words"][0]["end"] == following["words"][0]["start"]
+        assert saved.read_bytes() == before
+
 
 class TestNeverTheWrongTranscript:
     def test_another_file_in_the_same_directory_is_ignored(self, tmp_path):
