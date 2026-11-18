@@ -2525,7 +2525,7 @@ def get_viral_clips(transcript_result, video_duration, viewer_clips=None, output
                 "total_cost": sum(c.get("total_cost", 0) for c in costs),
                 "model": model_name,
             }
-            print(f"\U0001f4b0 Total cost ({model_name}, 2-pass, {len(costs)} calls): ${cost_analysis['total_cost']:.6f}")
+            print(f"\U0001f4b0 Total cost ({model_name}, 2-pass, {len(costs)} recorded results): ${cost_analysis['total_cost']:.6f}")
 
         if not shorts:
             print("⚠️ 2-pass returned no clips.")

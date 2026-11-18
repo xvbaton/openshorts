@@ -175,6 +175,8 @@ def test_ollama_pins_qwen_variant_and_bounds_scoring(monkeypatch, capsys):
     parsed, cost = llm_backend.generate_json("prompt", gemini_worker.ScoreResponse)
     assert parsed == {"windows": []}
     assert (cost["input_tokens"], cost["output_tokens"]) == (12, 8)
+    assert cost["reasoning_present"] and cost["thinking_tokens"] is None
+    assert cost["seconds"] >= 0
     assert "requested=qwen3.5:4b served=qwen3.5:4b" in capsys.readouterr().out
 
 

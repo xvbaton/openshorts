@@ -137,7 +137,8 @@ def _ollama_chat(client, model, messages, schema, scoring):
     return {"model": served, "choices": [{"message": message}], "usage": {
         "prompt_tokens": data.get("prompt_eval_count"),
         "completion_tokens": data.get("eval_count"),
-    }}
+    }, "metrics": {"seconds": elapsed, "load_seconds": (data.get("load_duration") or 0) / 1e9,
+                   "reasoning_present": bool(message.get("thinking"))}}
 
 
 def _response_formats(schema: Type[BaseModel]):
@@ -205,6 +206,10 @@ def generate_json(prompt: str, schema: Type[BaseModel], model: Optional[str] = N
         "price_estimated": False,
         "local": True,
     }
+    if native:
+        cost.update(data["metrics"])
+        # Ollama counts reasoning in completion_tokens and does not split it out.
+        cost["thinking_tokens"] = None if cost["reasoning_present"] else 0
     return validated, cost
 
 

@@ -100,3 +100,45 @@ timeouts and transient server failures get up to three attempts per call.
 The backend can requeue the job once more using its existing retry policy.
 An explicit token-limit failure requires reviewing the budget or disabling
 reasoning before retrying.
+
+The Zelda benchmark uses the existing source-verified transcript checkpoint.
+From the repository root, run the command below with a fresh output
+directory. The default excerpt is 240 seconds. Add `--think` for the
+reasoning run or `--seconds 0` for full transcript selection.
+
+```bash
+PYTHONPATH=. LLM_BASE_URL=http://127.0.0.1:11434 .venv/bin/python bin/benchmark_qwen.py \
+  .cache/asr-benchmark/zelda.mp4 .cache/asr-benchmark/native-1 \
+  .cache/qwen-benchmark/short-no-think
+```
+
+The benchmark saves the per-call timing and token counts, scores, selected
+clips, and Ollama model allocation in `measurements.json`. Ollama counts
+reasoning within its generated-token total. The Python memory measurement
+is peak RSS and includes startup imports.
+
+#### Zelda measurements
+
+Measured on a MacBook Pro M1 Pro with 16 GiB RAM and Ollama 0.40.16 (MLX).
+All served requests reported `qwen3.5:4b`. Ollama reported digest
+`7f3251fa6878` and a 4,096-token context. Times exclude transcript
+verification and Python startup. Model memory is the allocation reported by
+`/api/ps` after selection, a point measurement.
+
+| Run | Selection | Scoring | Scoring tokens in / out | Total tokens in / out | Clips | Ollama allocation | Peak Python RSS |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 240 s excerpt, reasoning off | 68.02 s | 18.12 s | 2,852 / 300 | 8,574 / 1,689 | 3 | 4.68 GiB | 408 MiB |
+| 734.49 s source, reasoning off | 115.68 s | 36.25 s | 7,693 / 825 | 18,437 / 3,233 | 9 | 6.52 GiB | 415 MiB |
+
+On the excerpt, the first scoring batch took 11.19 s without reasoning,
+including 3.73 s of model load, and produced 148 tokens and two scores.
+With reasoning, the same batch exhausted 1,024 tokens in 28.82 s and 2,048
+tokens in 54.49 s. Neither request produced usable scores. These runs do
+not establish a ranking-quality comparison.
+
+The full pass scored 11 windows, shortlisted 10, and completed five detail
+batches in 79.22 s. It discarded one overlapping proposal. A checkpoint-only
+replay took 13 ms and reproduced all nine clips exactly with zero LLM calls.
+Transcript review confirmed concrete hooks in several proposals and found
+titles with unsupported claims. Editorial quality and cut boundaries still
+need review against the source video.
