@@ -72,3 +72,31 @@ silently). Self-host `/api/process` then accepts a request without
 `X-Gemini-Key` and `/api/config.localLlm` tells the dashboard not to demand one.
 Frame-based stages (`layout_picker`, `screencast_layout`, `get_visual_clips`)
 stay on Gemini. Never wired in cloud mode: `BILLING_ENABLED` ignores it.
+
+### CLIPIN Qwen 4B
+
+In the backend environment, set `LLM_PROVIDER=ollama`,
+`LLM_MODEL=qwen3.5:4b`, and `LLM_BASE_URL=http://host.docker.internal:11434`
+for Docker or `http://127.0.0.1:11434` on the host. An existing URL ending in
+`/v1` works with this profile. The model defaults to `qwen3.5:4b` in the
+Ollama profile, including when the older untagged `qwen3.5` is configured.
+Requests use Ollama's native chat endpoint. The backend logs both tags and
+fails if Ollama reports a different tag, omits it, or truncates the response.
+
+The context is 4,096 tokens. Scoring ranks every window, up to three per
+request, with a default output budget of 384 tokens. `LLM_SCORE_BATCH` can
+lower that batch size. Detail requests carry at most two windows and produce
+up to three accepted clips per batch, with a 1,536-token output budget.
+`LLM_SCORE_THINK=1` enables experimental reasoning for scoring only and raises
+its default budget to 1,024 tokens. `LLM_SCORE_MAX_TOKENS` and
+`LLM_DETAIL_MAX_TOKENS` can adjust the output budgets up to 2,048.
+`LLM_TIMEOUT` controls the HTTPX read timeout (600 seconds by default).
+Connect and pool timeouts are 10 seconds, and the write timeout is 30 seconds.
+
+Completed score batches, the shortlist, and detail batches are written
+atomically under the job's `.clip-analysis/` directory. A restarted or
+retried job uses completed batches from the same prompts and settings. HTTPX
+timeouts and transient server failures get up to three attempts per call.
+The backend can requeue the job once more using its existing retry policy.
+An explicit token-limit failure requires reviewing the budget or disabling
+reasoning before retrying.

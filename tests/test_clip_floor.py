@@ -99,3 +99,53 @@ def test_scoring_fills_the_shortlist_it_targets(monkeypatch):
                                        for i in range(6)]])
     detail_windows = [c[1] for c in calls if c[0] == "detail"][0]
     assert len(detail_windows) == 8
+
+
+def test_qwen_resumes_after_a_failed_detail_batch(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    monkeypatch.setenv("LLM_BASE_URL", "http://llm.test")
+    monkeypatch.setenv("LLM_MODEL", "qwen3.5:4b")
+    monkeypatch.setenv("LLM_SCORE_BATCH", "99")
+    fail_once = True
+
+    def stage(client, model, prompt, schema):
+        nonlocal fail_once
+        scoring = schema is main.gemini_worker.ScoreResponse
+        windows = json.loads(prompt.split("WINDOWS_JSON:")[-1].split("Return only:")[0])
+        calls.append(("score" if scoring else "detail", tuple(w["id"] for w in windows)))
+        assert len(windows) <= (3 if scoring else 2)
+        if scoring:
+            return {"windows": [dict(w, score=80, reason="hook") for w in windows]}, {"input_tokens": 10}
+        if fail_once and sum(stage == "detail" for stage, _ in calls) == 2:
+            fail_once = False
+            raise main.TransientLLMError("Transient LLM error: ReadTimeout")
+        return {"shorts": [_clip(w["start"], w["id"]) for w in windows]}, {"input_tokens": 20}
+
+    monkeypatch.setattr(main, "_run_gemini_stage", stage)
+    with pytest.raises(main.TransientLLMError):
+        main.get_viral_clips(_transcript(), 600.0, output_dir=tmp_path)
+    checkpoints = tmp_path / ".clip-analysis"
+    assert len(list(checkpoints.glob("score-*.json"))) == 4
+    assert len(list(checkpoints.glob("shortlist-*.json"))) == 1
+    assert len(list(checkpoints.glob("detail-*.json"))) == 1
+    failed = calls[-1]
+    calls.clear()
+    result = main.get_viral_clips(_transcript(), 600.0, output_dir=tmp_path)
+    assert calls[0] == failed
+    assert all(kind == "detail" for kind, _ in calls)
+    assert len(result["shorts"]) == 8
+    assert result["cost_analysis"]["input_tokens"] == 120
+
+    calls.clear()
+    assert main.get_viral_clips(_transcript(), 600.0, output_dir=tmp_path) == result
+    assert calls == []
+
+    next(checkpoints.glob("detail-*.json")).write_text("null")
+    assert main.get_viral_clips(_transcript(), 600.0, output_dir=tmp_path) == result
+    assert [kind for kind, _ in calls] == ["detail"]
+
+    calls.clear()
+    monkeypatch.setenv("LLM_SCORE_THINK", "1")
+    main.get_viral_clips(_transcript(), 600.0, output_dir=tmp_path)
+    assert any(kind == "score" for kind, _ in calls)

@@ -301,6 +301,10 @@ Works with Ollama, LM Studio, vLLM, llama.cpp server, LocalAI and OpenRouter.
 The dashboard stops asking for a Gemini key when this is set. Two things to
 know:
 
+For CLIPIN's local Qwen 4B profile, set `LLM_PROVIDER=ollama` and
+`LLM_MODEL=qwen3.5:4b`. See [the Qwen 4B profile](docs/architecture/clip-selection.md#clipin-qwen-4b)
+for its request limits and job resume behavior.
+
 - **Context length.** A scoring call carries three transcript windows
   (~2-3k tokens) and the detail call up to ten (~5k on a long podcast).
   Ollama defaults to a 4096-token context and truncates silently, so run it

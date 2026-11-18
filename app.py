@@ -3602,7 +3602,7 @@ _TRANSIENT_MARKERS = (
     "out of memory", "outofmemory", "cuda", "cublas", "cudnn", "nvenc",
     "generic error in an external library", "exit code 187", "broken pipe",
     "no clips could be rendered", "resource_exhausted", "resource exhausted",
-    "503", "502", "500 internal", "overloaded", "deadline exceeded",
+    "503", "502", "500 internal", "overloaded", "deadline exceeded", "transient llm error",
     "exit code -9", "exit code -15", "killed",
 )
 _PERMANENT_MARKERS = (
@@ -3883,6 +3883,7 @@ async def _notify_clip_activity(job_id):
 # DownloadError:, GeminiBlockedError: — which "ERROR:" alone missed, leaving
 # alerts with a bare "Traceback ... exit code 1" and no cause (prod 20-ago).
 _ERROR_MARKERS = ("❌", "ERROR:", "Error:", "Traceback", "FATAL", "Exception",
+                  "Transient LLM error:",
                   "Process failed with exit code", "No metadata file generated",
                   "Execution error:",
                   # A clip render dies in two steps: reframe_v2 raises (it has

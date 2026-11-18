@@ -3,6 +3,7 @@ import cv2
 import subprocess
 import shutil
 import argparse
+import hashlib
 import re
 import sys
 import contextlib
@@ -2276,7 +2277,34 @@ def score_batch_size():
     return 3 if llm_backend.active() else 8
 
 
-def get_viral_clips(transcript_result, video_duration, viewer_clips=None):
+def _analysis_checkpoint(output_dir, label, identity, run):
+    if output_dir is None:
+        return run()
+    digest = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+    directory = os.path.join(output_dir, ".clip-analysis")
+    path = os.path.join(directory, f"{label}-{digest}.json")
+    try:
+        with open(path) as f:
+            rows, costs = json.load(f)
+        if all(isinstance(items, list) and all(isinstance(row, dict) for row in items)
+               for items in (rows, costs)):
+            print(f"   [LLM] resumed {label} ({len(rows)} result(s))")
+            return rows, costs
+    except FileNotFoundError:
+        pass
+    except (OSError, TypeError, ValueError) as e:
+        print(f"⚠️ Could not read {label} checkpoint: {e}")
+
+    rows, costs = run()
+    try:
+        os.makedirs(directory, exist_ok=True)
+        write_json_atomic(path, [rows, costs], ensure_ascii=False, allow_nan=False)
+    except (OSError, ValueError) as e:
+        print(f"⚠️ Could not save {label} checkpoint: {e}")
+    return rows, costs
+
+
+def get_viral_clips(transcript_result, video_duration, viewer_clips=None, output_dir=None):
     """Two-pass clip selection: score transcript windows, then detail the best.
 
     Windowing gives even coverage on long videos (a single call over the whole
@@ -2304,6 +2332,8 @@ def get_viral_clips(transcript_result, video_duration, viewer_clips=None):
         client = genai.Client(api_key=api_key)
         model_name = os.environ.get("GEMINI_MODEL") or 'gemini-3.1-flash-lite'
     print(f"\U0001f916  Model: {model_name} | language: {language}")
+    qwen = client is None and llm_backend.uses_qwen(model_name)
+    checkpoint_dir = output_dir if qwen else None
 
     # Full word list — ground truth for snapping cut points.
     words = []
@@ -2328,7 +2358,9 @@ def get_viral_clips(transcript_result, video_duration, viewer_clips=None):
         # Local models usually run with a 4-8k context (Ollama defaults to
         # 4096 unless OLLAMA_CONTEXT_LENGTH says otherwise) and 8 windows of
         # transcript do not fit; a silently truncated prompt scores garbage.
-        SCORE_BATCH = score_batch_size()
+        batch_size = score_batch_size()
+        if qwen:
+            batch_size = min(3, batch_size)
         # The batches only split the work: the prompt scores every window it
         # is given and the shortlist below is the global top `target`. Letting
         # each batch SELECT instead (the old "up to 3 per batch") capped the
@@ -2356,25 +2388,61 @@ def get_viral_clips(transcript_result, video_duration, viewer_clips=None):
                 video_duration=video_duration, language=language,
                 windows_json=json.dumps(_payload(ws), ensure_ascii=False))
 
-        for batch in score_batches(windows, SCORE_BATCH):
-            scored.extend(_run_stage_split(
-                client, model_name, batch, _score_prompt,
-                gemini_worker.ScoreResponse, "windows", costs, "score"))
+        def _batch(batch, build, schema, key, label):
+            if not qwen:
+                return _run_stage_split(client, model_name, batch, build, schema, key, costs, label)
+            prompt = build(batch)
+            bounds = {w["id"]: (w["start"], w["end"]) for w in batch}
+            scoring = key == "windows"
+
+            def run():
+                parsed, cost = _run_gemini_stage(client, model_name, prompt, schema)
+                rows = parsed[key]
+                if scoring:
+                    by_id = {row["id"]: row for row in rows}
+                    if (by_id.keys() != bounds.keys() or len(rows) != len(bounds)
+                            or any(not 0 <= row["score"] <= 100 for row in rows)):
+                        raise TransientLLMError("Transient LLM error: invalid or missing window scores")
+                    rows = [by_id[window_id] for window_id in bounds]
+                else:
+                    # Small timestamp rounding differences are snapped to real words below.
+                    rows = [s for s in rows
+                            if s["source_window_id"] in bounds
+                            and bounds[s["source_window_id"]][0] - 0.1 <= s["start"] < s["end"]
+                            <= bounds[s["source_window_id"]][1] + 0.1
+                            and 0 <= s["predicted_score"] <= 100]
+                    print(f"   [LLM] {label}: accepted {len(rows)}/{len(parsed[key])} proposal(s)")
+                return rows, [cost] if cost else []
+
+            rows, batch_costs = _analysis_checkpoint(
+                checkpoint_dir, label,
+                [1, llm_backend.base_url(), model_name, llm_backend.qwen_options(scoring),
+                 schema.model_json_schema(), prompt], run)
+            costs.extend(batch_costs)
+            return rows
+
+        for batch in score_batches(windows, batch_size):
+            scored.extend(_batch(batch, _score_prompt, gemini_worker.ScoreResponse,
+                                 "windows", "score"))
 
         # Shortlist the top windows; scale with duration so long videos surface
         # more candidates without exploding the detail call.
         scored.sort(key=lambda w: w.get("score", 0), reverse=True)
         by_id = {w["id"]: w for w in windows}
-        shortlist = [by_id[w["id"]] for w in scored[:target] if w.get("id") in by_id]
-        if not shortlist:
-            shortlist = windows[:target]  # scoring returned nothing usable
-        if heat:
-            before = {w["id"] for w in shortlist}
-            ranked = [by_id[w["id"]] for w in scored if w.get("id") in by_id] or windows
-            shortlist = twitch_signals.promote_hot_windows(shortlist, ranked, heat, target)
-            added = [w["id"] for w in shortlist if w["id"] not in before]
-            if added:
-                print(f"   👀 Promoted {len(added)} window(s) viewers clipped: {added}")
+        def _shortlist():
+            picked = [by_id[w["id"]] for w in scored[:target] if w.get("id") in by_id]
+            picked = picked or windows[:target]
+            if heat:
+                before = {w["id"] for w in picked}
+                ranked = [by_id[w["id"]] for w in scored if w.get("id") in by_id] or windows
+                picked = twitch_signals.promote_hot_windows(picked, ranked, heat, target)
+                added = [w["id"] for w in picked if w["id"] not in before]
+                if added:
+                    print(f"   👀 Promoted {len(added)} window(s) viewers clipped: {added}")
+            return picked, []
+
+        shortlist, _ = _analysis_checkpoint(
+            checkpoint_dir, "shortlist", [1, target, windows, scored, heat], _shortlist)
         print(f"   Shortlisted {len(shortlist)} window(s) for detail.")
 
         # --- Pass 2: detailed clip extraction on the shortlist ---
@@ -2391,9 +2459,20 @@ def get_viral_clips(transcript_result, video_duration, viewer_clips=None):
                     windows_json=json.dumps(_payload(ws), ensure_ascii=False))
             return build
 
-        shorts = _run_stage_split(client, model_name, shortlist,
-                                  _detail_prompt_for(min_clips, max_clips),
-                                  gemini_worker.DetailResponse, "shorts", costs, "detail")
+        def _detail(items, low, high, label):
+            if not qwen:
+                return _batch(items, _detail_prompt_for(low, high),
+                              gemini_worker.DetailResponse, "shorts", label)
+            found = []
+            for batch in score_batches(items, 2):
+                upper = min(3, high, 2 * len(batch))
+                lower = min(upper, -(-low * len(batch) // len(items)))
+                clips = _batch(batch, _detail_prompt_for(lower, upper),
+                               gemini_worker.DetailResponse, "shorts", label)
+                found.extend(trim_to_best(clips, upper) if len(clips) > upper else clips)
+            return found
+
+        shorts = _detail(shortlist, min_clips, max_clips, "detail")
 
         # The floor lived only in the prompt, and a prompt is not a contract:
         # the model regularly returned half of it and the job shipped that.
@@ -2408,10 +2487,7 @@ def get_viral_clips(transcript_result, video_duration, viewer_clips=None):
                 missing = min_clips - len(shorts)
                 print(f"   Detail returned {len(shorts)} clip(s) of {min_clips}; "
                       f"asking the {len(spare)} unused window(s) for {missing} more.")
-                extra = _run_stage_split(
-                    client, model_name, spare,
-                    _detail_prompt_for(missing, max(missing, len(spare))),
-                    gemini_worker.DetailResponse, "shorts", costs, "detail-floor")
+                extra = _detail(spare, missing, max(missing, len(spare)), "detail-floor")
                 if extra:
                     shorts = sorted(shorts + extra,
                                     key=lambda s: float(s.get("start") or 0))
@@ -2464,7 +2540,11 @@ def get_viral_clips(transcript_result, video_duration, viewer_clips=None):
         # reason instead of a generic "no clips found".
         print(f"🚫 {e}")
         raise
+    except TransientLLMError:
+        raise
     except Exception as e:
+        if qwen:
+            raise
         print(f"❌ Gemini Error: {e}")
         return None
 
@@ -2811,6 +2891,8 @@ if __name__ == '__main__':
         # precomputed transcript already has them. SOURCE_CAP_MINUTES is set on
         # every metered job but only cuts a download clearly longer than the
         # reservation; when it does, the early result is dropped below.
+        # Qwen scores after the final transcript is saved, so both checkpoints
+        # share the same job lifetime.
         early = {"lock": threading.Lock(), "transcribed": threading.Event(),
                  "done": threading.Event(), "started": False,
                  "abandoned": False, "invalid": False, "transcript": None, "clips": None}
@@ -2822,7 +2904,8 @@ if __name__ == '__main__':
                     early["transcript"] = t
                 finally:
                     early["transcribed"].set()
-                if audio_duration and not speech_is_sparse(t, audio_duration):
+                if (audio_duration and not speech_is_sparse(t, audio_duration)
+                        and not (llm_backend.active() and llm_backend.uses_qwen(llm_backend.model_name()))):
                     early["clips"] = get_viral_clips(t, audio_duration,
                                                      viewer_clips=viewer_clips)
             except Exception as e:
@@ -3031,7 +3114,8 @@ if __name__ == '__main__':
             print("♻️ Using the clips Gemini picked while the video downloaded.")
             clips_data = early_clips
         elif transcript is not None:
-            clips_data = get_viral_clips(transcript, duration, viewer_clips=viewer_clips)
+            clips_data = get_viral_clips(transcript, duration, viewer_clips=viewer_clips,
+                                         output_dir=output_dir)
         else:
             clips_data = get_visual_clips(input_video, duration, viewer_clips=viewer_clips)
 

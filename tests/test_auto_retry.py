@@ -83,6 +83,12 @@ def _run_wrapper(monkeypatch, job_id, final_status, raise_cancel=False):
 
 
 class TestClassification:
+    def test_llm_timeout_is_transient_even_with_other_errors_in_the_log(self):
+        assert app_module.is_transient_failure([
+            "Error: temporary download interruption",
+            "TransientLLMError: Transient LLM error: ReadTimeout: timed out",
+        ])
+
     def test_gpu_oom_is_transient(self):
         assert app_module.is_transient_failure(
             ["❌ Clip 1 failed: RuntimeError: CUDA out of memory"])
