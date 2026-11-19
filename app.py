@@ -955,6 +955,9 @@ async def _owner_id_from_request(request):
 job_queue = asyncio.PriorityQueue()
 _job_seq = itertools.count()  # kept for callers that reset it; keys are times now
 jobs: Dict[str, Dict] = {}
+# Self-host cancellation: only the job's own subprocess is signalled.
+_local_processes = {}
+_cancelled_local_jobs = set()
 thumbnail_sessions: Dict[str, Dict] = {}
 publish_jobs: Dict[str, Dict] = {}  # {publish_id: {status, result, error}}
 # Semester to limit concurrency to MAX_CONCURRENT_JOBS
@@ -3258,6 +3261,12 @@ async def process_queue():
                 job_queue.task_done()
                 continue
 
+            # Cancelled queued entries stay in the priority heap until popped.
+            # Never dispatch or resurrect them.
+            if job_id in _cancelled_local_jobs:
+                job_queue.task_done()
+                continue
+
             # Acquire semaphore slot (waits if max jobs are running)
             _admitting.add(job_id)
             await concurrency_semaphore.acquire()
@@ -3274,6 +3283,10 @@ async def process_queue():
                 concurrency_semaphore.release()
                 job_queue.task_done()
                 print(f"⏸️ Draining — leaving {job_id} for the next instance.")
+                continue
+            if job_id in _cancelled_local_jobs:
+                concurrency_semaphore.release()
+                job_queue.task_done()
                 continue
             print(f"🔄 Acquired slot for job: {job_id}")
             _cap_clips_at_dispatch(jobs.get(job_id), _priority)
@@ -5144,6 +5157,9 @@ async def _run_main(job_id, cmd, env, tick=None):
         cwd=os.getcwd(),
         preexec_fn=(_lower_priority if nice and launch[0] != "nice" else None),
     )
+    _local_processes[job_id] = process
+    if job_id in _cancelled_local_jobs and process.poll() is None:
+        process.terminate()
     # We need to capture logs in a thread because Popen isn't async
     t_log = threading.Thread(target=enqueue_output, args=(process.stdout, job_id))
     t_log.daemon = True
@@ -5167,6 +5183,7 @@ async def _run_main(job_id, cmd, env, tick=None):
     # The exit code can be read before the reader thread saw the last lines
     # (SOURCE_READY is printed right before the exit).
     await asyncio.to_thread(t_log.join, 5)
+    _local_processes.pop(job_id, None)
     return process.returncode
 
 
@@ -5189,7 +5206,11 @@ async def run_job(job_id, job_data):
     try:
         returncode = await _run_main(
             job_id, cmd, env, tick=lambda: _refresh_partial_result(job_id, output_dir))
-        _finish_job(job_id, returncode, output_dir)
+        if job_id in _cancelled_local_jobs:
+            jobs[job_id]['status'] = 'failed'
+            jobs[job_id]['logs'].append("Generation stopped by user.")
+        else:
+            _finish_job(job_id, returncode, output_dir)
     except Exception as e:
         jobs[job_id]['status'] = 'failed'
         # Exception text can embed URLs with credentials (e.g. the proxy URL
@@ -6671,6 +6692,61 @@ async def _status_from_snapshot(request, snap, queue):
         "queue": queue if status == 'queued' else None,
         "partial": snap.get("partial"),
     }
+
+
+@app.get("/api/local/projects")
+async def list_local_projects(request: Request):
+    """Local workspace: running, queued and completed jobs survive page reloads."""
+    if BILLING_ENABLED:
+        raise HTTPException(status_code=404, detail="Not found")
+    found = {}
+    for job_id, job in list(jobs.items()):
+        if not _JOB_ID_RE.match(job_id):
+            continue
+        found[job_id] = {
+            "job_id": job_id, "status": _presented_status(job_id, job),
+            "updated_at": os.path.getmtime(os.path.join(OUTPUT_DIR, job_id))
+            if os.path.isdir(os.path.join(OUTPUT_DIR, job_id)) else time.time(),
+            "clips": len(((job.get("result") or {}).get("clips") or [])),
+        }
+    if os.path.isdir(OUTPUT_DIR):
+        for job_id in os.listdir(OUTPUT_DIR):
+            if not _JOB_ID_RE.match(job_id) or job_id in found:
+                continue
+            path = os.path.join(OUTPUT_DIR, job_id)
+            if not os.path.isdir(path):
+                continue
+            job = _job_view_from_disk(job_id)
+            if job:
+                found[job_id] = {
+                    "job_id": job_id, "status": job.get("status", "unknown"),
+                    "updated_at": os.path.getmtime(path),
+                    "clips": len(((job.get("result") or {}).get("clips") or [])),
+                }
+    return {"projects": sorted(found.values(), key=lambda x: x["updated_at"], reverse=True)}
+
+
+@app.post("/api/local/projects/{job_id}/stop")
+async def stop_local_project(job_id: str, request: Request):
+    """Stop a self-host job, without affecting any other worker or job."""
+    if BILLING_ENABLED:
+        raise HTTPException(status_code=404, detail="Not found")
+    if not _JOB_ID_RE.match(job_id):
+        raise HTTPException(status_code=404, detail="Job not found")
+    job = jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Active job not found")
+    if job.get("status") not in ("queued", "processing"):
+        raise HTTPException(status_code=409, detail="Job is not running")
+    if job_id in _remote_jobs:
+        raise HTTPException(status_code=409, detail="Remote job cannot be stopped here")
+    _cancelled_local_jobs.add(job_id)
+    job["status"] = "failed"
+    job["logs"].append("Generation stopped by user.")
+    process = _local_processes.get(job_id)
+    if process is not None and process.poll() is None:
+        process.terminate()
+    return {"job_id": job_id, "status": "stopping" if process else "stopped"}
 
 
 @app.get("/api/status/{job_id}")
