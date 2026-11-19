@@ -26,6 +26,7 @@ import LoginModal from './components/LoginModal';
 import TrialGate from './components/TrialGate';
 import AdvancedBanner from './components/AdvancedBanner';
 import HistoryTab from './components/HistoryTab';
+import LocalProjects from './components/LocalProjects';
 import AutopilotTab from './components/AutopilotTab';
 import ProfileMenu from './components/ProfileMenu';
 import Modal from './components/ui/Modal';
@@ -1074,7 +1075,7 @@ function App() {
   // dropped so a reload does not keep forcing the tab.
   const [autopilotConnected, setAutopilotConnected] = useState(null); // connect outcome, see lib/connectReturn.js
   useEffect(() => {
-    const DEEP_LINK_TABS = ['autopilot', 'history', 'settings', 'thumbnails', 'dashboard', 'saasshorts'];
+    const DEEP_LINK_TABS = ['autopilot', 'history', 'projects', 'settings', 'thumbnails', 'dashboard', 'saasshorts'];
     const apply = () => {
       const hash = window.location.hash || '';
       if (!hash.startsWith('#app?')) return;
@@ -1404,6 +1405,19 @@ function App() {
     handleProcessRef.current(pending.data);
   }, [billingEnabled, isSignedIn]);
 
+  const [stoppingJob, setStoppingJob] = useState(false);
+  const stopCurrentJob = async () => {
+    if (!jobId || stoppingJob || !window.confirm('Arrêter cette génération ?')) return;
+    setStoppingJob(true);
+    try {
+      const response = await apiFetch(`/api/local/projects/${jobId}/stop`, { method: 'POST' });
+      if (!response.ok) throw new Error(await response.text());
+      setLogs((previous) => [...previous, 'Arrêt demandé.']);
+    } catch (error) {
+      alert(`Impossible d’arrêter : ${error.message}`);
+    } finally { setStoppingJob(false); }
+  };
+
   const handleReset = () => {
     setJobGone(false);
     // Flush any pending edit-state sync before dropping the project: the clips
@@ -1432,7 +1446,11 @@ function App() {
   // One nav definition drives all three surfaces: the desktop rail, the mobile
   // drawer, and the bottom tab bar. `short` is the tab-bar label — the full one
   // wraps to two lines in a 5-up bar on a 360px phone.
-  const navItems = [
+  const navItems = !billingEnabled ? [
+    { id: 'dashboard', ord: '01', icon: LayoutDashboard, label: 'Générer', short: 'générer', primary: true },
+    { id: 'projects', ord: '02', icon: History, label: 'Mes projets', short: 'projets', primary: true },
+    { id: 'settings', ord: '03', icon: Settings, label: 'Paramètres', short: 'réglages', primary: true },
+  ] : [
     { id: 'dashboard', ord: '01', icon: LayoutDashboard, label: 'Clip Generator', short: 'clips', primary: true },
     // Cloud only: it runs on the managed pipeline and the Upload-Post connection.
     ...(billingEnabled ? [{ id: 'autopilot', ord: '02', icon: Rocket, label: 'Autopilot', short: 'autopilot', isNew: true }] : []),
@@ -1441,6 +1459,7 @@ function App() {
     { id: 'ugc-gallery', ord: '05', icon: LayoutGrid, label: 'UGC Gallery', short: 'gallery', primary: true },
     { id: 'thumbnails', ord: '06', icon: Image, label: 'YouTube Studio', short: 'studio', primary: true },
     ...(billingEnabled && isSignedIn ? [{ id: 'history', ord: '07', icon: History, label: 'History', short: 'history' }] : []),
+    ...(!billingEnabled ? [{ id: 'projects', ord: '07', icon: History, label: 'Mes projets', short: 'projets', primary: true }] : []),
     { id: 'settings', ord: '08', icon: Settings, label: 'Settings', short: 'settings' },
   ];
   const activeNav = navItems.find((n) => n.id === activeTab);
@@ -1504,11 +1523,11 @@ function App() {
   // entirely — an unlabelled 80px rail ate a fifth of a phone screen.
   const Sidebar = () => (
     <div className="hidden md:flex w-20 lg:w-64 bg-paper2 border-r border-rule flex-col h-full shrink-0 transition-all duration-300">
-      <a href="#app" onClick={() => goToTab('dashboard')} className="p-6 flex items-center gap-3" title="openshorts home">
+      <a href="#app" onClick={() => goToTab('dashboard')} className="p-6 flex items-center gap-3" title="CLIPIN">
         <div className="w-8 h-8 bg-paper3 rounded-input flex items-center justify-center shrink-0 overflow-hidden border border-rule">
           <img src="/logo-openshorts.png" alt="Logo" className="w-full h-full object-cover" />
         </div>
-        <span className="font-display lowercase text-lg text-ink hidden lg:block">openshorts</span>
+        <span className="font-display text-lg text-ink hidden lg:block">{billingEnabled ? 'openshorts' : 'CLIPIN'}</span>
       </a>
 
       <nav className="flex-1 px-4 py-4 space-y-1">
@@ -1539,9 +1558,9 @@ function App() {
         })}
       </nav>
 
-      <div className="p-4 border-t border-rule space-y-1">
+      {billingEnabled && <div className="p-4 border-t border-rule space-y-1">
         <NavFooterLinks collapsed />
-      </div>
+      </div>}
     </div>
   );
 
@@ -1564,7 +1583,7 @@ function App() {
             <div className="w-7 h-7 bg-paper3 rounded-input overflow-hidden border border-rule shrink-0">
               <img src="/logo-openshorts.png" alt="" className="w-full h-full object-cover" />
             </div>
-            <span className="font-display lowercase text-lg text-ink">openshorts</span>
+            <span className="font-display text-lg text-ink">{billingEnabled ? 'openshorts' : 'CLIPIN'}</span>
           </a>
           <button
             onClick={() => setNavOpen(false)}
@@ -1602,9 +1621,9 @@ function App() {
           })}
         </nav>
 
-        <div className="px-3 py-3 border-t border-rule space-y-0.5 safe-bottom shrink-0">
+        {billingEnabled && <div className="px-3 py-3 border-t border-rule space-y-0.5 safe-bottom shrink-0">
           <NavFooterLinks />
-        </div>
+        </div>}
       </div>
     </div>
   );
@@ -1678,10 +1697,10 @@ function App() {
               <button
                 onClick={handleReset}
                 className="btn-quiet px-3 py-1.5 text-xs shrink-0"
-                aria-label="New Project"
+                aria-label="Nouveau projet"
               >
                 <Plus size={14} />
-                <span className="hidden sm:inline">New Project</span>
+                <span className="hidden sm:inline">Nouveau projet</span>
               </button>
             )}
           </div>
@@ -1793,10 +1812,10 @@ function App() {
         )}
 
         {/* Included tools (Clip Generator, YouTube Studio): non-blocking trial prompt. */}
-        {gateThisTab && <TrialGate toolName={TOOL_NAMES[activeTab] || 'this'} />}
+        {billingEnabled && gateThisTab && <TrialGate toolName={TOOL_NAMES[activeTab] || 'this'} />}
 
         {/* Advanced tools (AI Shorts, AI Agent): BYOK fal.ai + ElevenLabs notice. */}
-        {advancedThisTab && <AdvancedBanner needsPlan={needsPlan} onKeys={() => goToTab('settings')} />}
+        {billingEnabled && advancedThisTab && <AdvancedBanner needsPlan={needsPlan} onKeys={() => goToTab('settings')} />}
 
         {/* Main Workspace */}
         <div className="flex-1 overflow-hidden relative">
@@ -2274,6 +2293,23 @@ function App() {
             </div>
           )}
 
+          {!billingEnabled && activeTab === 'projects' && (
+            <LocalProjects onOpen={async (id) => {
+              const data = await pollJob(id);
+              flushClipState();
+              setJobId(id);
+              setResults(data.result || null);
+              setLogs(data.logs || []);
+              setLogTimes(data.log_times || []);
+              setProcessingMedia({ type: 'server', payload: `/api/source/${id}` });
+              setNoSource(false);
+              setQueueInfo(data.queue || null);
+              setStatus(data.status === 'completed' ? 'complete' :
+                data.status === 'failed' ? 'error' : 'processing');
+              setActiveTab('dashboard');
+            }} />
+          )}
+
           {/* View: Processing / Results (Split View) */}
           {activeTab === 'dashboard' && (status === 'processing' || status === 'complete' || status === 'error') && (
             <div className="h-full flex flex-col md:flex-row gap-3 md:gap-4 p-3 md:p-4 overflow-y-auto md:overflow-y-hidden custom-scrollbar animate-fade">
@@ -2285,6 +2321,7 @@ function App() {
                     <Activity className={`text-brass ${status === 'processing' ? 'animate-pulse' : ''}`} size={18} />
                     Live Analysis
                   </h2>
+                  {!billingEnabled && status === 'processing' && <button type="button" className="btn-ghost text-xs" disabled={stoppingJob} onClick={stopCurrentJob}>{stoppingJob ? 'Arrêt…' : '■ Arrêter'}</button>}
                   <span className={status === 'processing' ? 'badge-brass' :
                     status === 'complete' ? 'badge-ok' :
                       'badge-danger'
@@ -2374,7 +2411,7 @@ function App() {
 
                 {/* The render is dead time: the user is watching a progress bar
                     with nothing to do, so this is where the one star ask goes. */}
-                {status === 'processing' && (
+                {billingEnabled && status === 'processing' && (
                   <div className="my-3">
                     <StarBanner message="Got a minute while this renders?" />
                   </div>
