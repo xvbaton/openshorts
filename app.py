@@ -5161,17 +5161,34 @@ async def _run_main(job_id, cmd, env, tick=None):
         env=env,
         cwd=os.getcwd(),
         preexec_fn=(_lower_priority if nice and launch[0] != "nice" else None),
+        start_new_session=True,
     )
     _local_processes[job_id] = process
     if job_id in _cancelled_local_jobs and process.poll() is None:
-        process.terminate()
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
     # We need to capture logs in a thread because Popen isn't async
     t_log = threading.Thread(target=enqueue_output, args=(process.stdout, job_id))
     t_log.daemon = True
     t_log.start()
 
     last_heartbeat = time.time()
+    stop_sent_at = None
     while process.poll() is None:
+        if job_id in _cancelled_local_jobs:
+            if stop_sent_at is None:
+                stop_sent_at = time.monotonic()
+                try:
+                    os.killpg(process.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+            elif time.monotonic() - stop_sent_at >= 6:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
         try:
             await asyncio.sleep(2)
         except asyncio.CancelledError:
@@ -6757,7 +6774,10 @@ async def stop_local_project(job_id: str, request: Request):
         marker.write("stopped")
     process = _local_processes.get(job_id)
     if process is not None and process.poll() is None:
-        process.terminate()
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
     return {"job_id": job_id, "status": "stopping" if process else "stopped"}
 
 
