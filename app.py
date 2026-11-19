@@ -958,6 +958,7 @@ jobs: Dict[str, Dict] = {}
 # Self-host cancellation: only the job's own subprocess is signalled.
 _local_processes = {}
 _cancelled_local_jobs = set()
+_LOCAL_STOP_MARKER = ".clipin-stopped"
 thumbnail_sessions: Dict[str, Dict] = {}
 publish_jobs: Dict[str, Dict] = {}  # {publish_id: {status, result, error}}
 # Semester to limit concurrency to MAX_CONCURRENT_JOBS
@@ -2068,6 +2069,8 @@ def _manifest_path(job_id):
 
 
 def _read_manifest(job_id):
+    if os.path.exists(os.path.join(OUTPUT_DIR, job_id, _LOCAL_STOP_MARKER)):
+        return None
     try:
         with open(_manifest_path(job_id)) as f:
             return json.load(f)
@@ -3263,7 +3266,7 @@ async def process_queue():
 
             # Cancelled queued entries stay in the priority heap until popped.
             # Never dispatch or resurrect them.
-            if job_id in _cancelled_local_jobs:
+            if job_id in _cancelled_local_jobs or os.path.exists(os.path.join(OUTPUT_DIR, job_id, _LOCAL_STOP_MARKER)):
                 job_queue.task_done()
                 continue
 
@@ -3284,7 +3287,7 @@ async def process_queue():
                 job_queue.task_done()
                 print(f"⏸️ Draining — leaving {job_id} for the next instance.")
                 continue
-            if job_id in _cancelled_local_jobs:
+            if job_id in _cancelled_local_jobs or os.path.exists(os.path.join(OUTPUT_DIR, job_id, _LOCAL_STOP_MARKER)):
                 concurrency_semaphore.release()
                 job_queue.task_done()
                 continue
@@ -3638,6 +3641,8 @@ def _should_auto_retry(job) -> bool:
     # A run on the remote worker that did not complete is always run again
     # here, whatever it printed: this host decides what a video's failure is.
     if not (job and job.get('status') == 'failed' and not _draining and job.get('cmd')):
+        return False
+    if job.get("user_stopped"):
         return False
     # YouTube limiting the account is neither the video's fault nor a server
     # fault: the job waits out the cooldown, a few times at most, on its own
@@ -6458,6 +6463,9 @@ def _job_view_from_disk(job_id):
     job_path = os.path.join(OUTPUT_DIR, job_id)
     if not os.path.isdir(job_path):
         return None
+    if os.path.exists(os.path.join(job_path, _LOCAL_STOP_MARKER)):
+        return {'status': 'failed', 'logs': _TimedLog(['Generation stopped by user.']),
+                'user_id': None, 'result': None}
     m = _read_manifest(job_id)
     if m is None and os.path.exists(os.path.join(job_path, _EXPIRED_MARKER)):
         owner = None
@@ -6742,7 +6750,11 @@ async def stop_local_project(job_id: str, request: Request):
         raise HTTPException(status_code=409, detail="Remote job cannot be stopped here")
     _cancelled_local_jobs.add(job_id)
     job["status"] = "failed"
+    job["user_stopped"] = True
     job["logs"].append("Generation stopped by user.")
+    os.makedirs(os.path.join(OUTPUT_DIR, job_id), exist_ok=True)
+    with open(os.path.join(OUTPUT_DIR, job_id, _LOCAL_STOP_MARKER), "w") as marker:
+        marker.write("stopped")
     process = _local_processes.get(job_id)
     if process is not None and process.poll() is None:
         process.terminate()
