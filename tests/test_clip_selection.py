@@ -91,6 +91,55 @@ class TestSnapClipToWords:
         assert end - start <= 60.0
 
 
+class TestEditorialBoundaries:
+    def test_start_moves_back_to_sentence_start(self):
+        words = [
+            _word("Les", 10.0, 10.4),
+            _word("capsules", 10.5, 11.2),
+            _word("coûtent", 11.3, 11.9),
+            _word("cher.", 12.0, 12.6),
+            _word("Mais", 13.0, 13.4),
+            _word("les", 13.5, 13.8),
+            _word("grains", 13.9, 14.4),
+            _word("économisent.", 14.5, 15.4),
+            _word("Ensuite", 16.0, 16.5),
+            _word("on", 16.6, 16.8),
+            _word("compare.", 17.0, 17.5),
+        ]
+        start, end = snap_clip_to_words(
+            11.5, 15.0, words, 25.0, min_duration=3, max_duration=20)
+        assert 9.8 <= start <= 10.0
+        assert 15.4 <= end <= 15.7
+
+    def test_payoff_extends_to_sentence_end(self):
+        words = [
+            _word("Le", 0, 0.3), _word("coût", 0.4, 0.8),
+            _word("total", 0.9, 1.4), _word("baisse", 1.5, 2.1),
+            _word("après", 2.2, 2.6), _word("trois", 2.7, 3.1),
+            _word("ans.", 3.2, 3.7),
+        ]
+        start, end = snap_clip_to_words(
+            0.1, 2.5, words, 10, min_duration=1, max_duration=10)
+        assert end >= 3.7
+
+    def test_duration_cap_prevents_overextension(self):
+        words = [
+            _word("Début", 0, 0.5), _word("important", 0.6, 1.3),
+            _word("fin.", 1.4, 2.0), _word("Suite", 2.2, 2.7),
+            _word("longue", 2.8, 3.4), _word("encore", 3.5, 4.2),
+            _word("et", 4.3, 4.5), _word("fin.", 4.6, 5.2),
+        ]
+        start, end = snap_clip_to_words(
+            1.0, 3.5, words, 10, min_duration=1, max_duration=3)
+        assert 0 < end - start <= 3
+
+    def test_default_duration_for_spoken_clips(self, monkeypatch):
+        from clip_selection import clip_duration_bounds
+        monkeypatch.delenv("CLIP_MIN_SECONDS", raising=False)
+        monkeypatch.delenv("CLIP_MAX_SECONDS", raising=False)
+        assert clip_duration_bounds() == (25.0, 90.0)
+
+
 class TestPricing:
     def test_known_models(self):
         assert lookup_model_prices("gemini-2.5-flash") == (0.30, 2.50)
