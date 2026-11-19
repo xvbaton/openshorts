@@ -43,6 +43,7 @@ time.sleep(0.2)
     monkeypatch.setattr(tb, "_extract_wav", lambda _: wav)
     monkeypatch.setenv("TRANSCRIBE_BACKEND", "whisperkit")
     monkeypatch.setenv("WHISPERKIT_MODEL", "small")
+    monkeypatch.setenv("WHISPERKIT_LANGUAGE", "fr")
     with serve(cli, tmp_path / "small", port=0, timeout=5) as server:
         thread = threading.Thread(target=server.serve_forever)
         thread.start()
@@ -57,6 +58,8 @@ time.sleep(0.2)
     assert result["segments"] == REPORT["segments"]
     assert result["timings"] == REPORT["timings"]
     assert result["metadata"]["backend"] == "whisperkit"
+    assert result["metadata"]["task"] == "transcribe"
+    assert result["metadata"]["requested_language"] == "fr"
     assert not wav.exists()
 
 
