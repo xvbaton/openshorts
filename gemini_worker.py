@@ -303,6 +303,13 @@ CLIP RULES:
 - Stay within the candidate window boundaries.
 - THE 2-SECOND RULE: the clip MUST open on its strongest moment. If the first
   2 seconds would not stop a cold viewer from scrolling, move the start or skip the clip.
+- Start at the BEGINNING of the sentence or thought that sets up the hook, not at
+  the first interesting word in the middle of a sentence. End after the
+  complete payoff sentence. A clean narrative cut outranks a punchy but
+  incomprehensible first two seconds.
+- For spoken explanations, prefer self-contained 35-60 second stories when
+  the material supports them. Shorter moments are fine if genuinely complete;
+  do not add filler just to hit a duration target.
 - Start slightly before the hook and end slightly after the payoff when possible.
 - When a window has `viewer_moments` ([start, end] stretches the stream's
   viewers clipped), the best clip of that window should cover the strongest

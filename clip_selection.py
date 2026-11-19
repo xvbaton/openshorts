@@ -192,7 +192,7 @@ def vision_segments(video_duration, segment_seconds, max_segments):
 def clip_duration_bounds():
     """The clip length band (seconds) the selection prompts and word-snapping
     enforce. ``CLIP_MIN_SECONDS`` / ``CLIP_MAX_SECONDS`` override the classic
-    15-60 — set per job by /api/process when the user asks for a specific
+    25-90 for speech — set per job by /api/process when the user asks for a specific
     length, or by hand for A/B runs. Values are clamped to platform-sane
     limits and re-ordered so bad input degrades instead of breaking the job.
     """
@@ -204,8 +204,8 @@ def clip_duration_bounds():
         except ValueError:
             return default
 
-    lo = _read("CLIP_MIN_SECONDS", 15.0)
-    hi = _read("CLIP_MAX_SECONDS", 60.0)
+    lo = _read("CLIP_MIN_SECONDS", 25.0)
+    hi = _read("CLIP_MAX_SECONDS", 90.0)
     lo = min(max(lo, 5.0), 175.0)
     hi = min(max(hi, 10.0), 180.0)
     if hi < lo + 5.0:  # keep a real band: degenerate ranges starve the model
@@ -371,11 +371,47 @@ def snap_clip_to_words(start, end, words, video_duration,
             tail = max_tail
         new_end = min(float(video_duration), word_end + tail)
 
+    # Word-accurate cuts can still start in the middle of a sentence.
+    # Back up to the beginning of the current thought and include its payoff,
+    # where punctuation or a substantial pause provides reliable evidence.
+    word_snapped_start, word_snapped_end = new_start, new_end
+    sentence_starts, sentence_ends = [], []
+    for i, word in enumerate(words):
+        previous = words[i - 1] if i else None
+        following = words[i + 1] if i + 1 < len(words) else None
+        prev_text = str(previous.get("w", "")).strip() if previous else ""
+        text = str(word.get("w", "")).strip()
+        gap_before = starts[i] - ends[i - 1] if previous else 0.0
+        gap_after = starts[i + 1] - ends[i] if following else 0.0
+        if i == 0 or prev_text.endswith((".", "!", "?", "…")) or gap_before >= 0.75:
+            sentence_starts.append(starts[i])
+        if not following or text.endswith((".", "!", "?", "…")) or gap_after >= 0.75:
+            sentence_ends.append(ends[i])
+
+    earlier = [s for s in sentence_starts if start - 12.0 <= s <= start + 0.15]
+    if earlier:
+        candidate = max(0.0, max(earlier) - 0.15)
+        if new_end - candidate <= max_duration:
+            new_start = candidate
+
+    later = [e for e in sentence_ends if end - 0.15 <= e <= end + 12.0]
+    if later:
+        candidate = min(float(video_duration), min(later) + 0.2)
+        if candidate - new_start <= max_duration:
+            new_end = candidate
+
+    if new_end - new_start > max_duration:
+        new_start, new_end = word_snapped_start, word_snapped_end
+
     # Repair duration bounds while staying on word boundaries.
     if new_end - new_start < min_duration:
         target = new_start + min_duration
+        natural = [e for e in sentence_ends
+                   if e >= target and e + 0.2 - new_start <= max_duration]
         later = sorted(e for e in ends if e >= target)
-        if later and later[0] - new_start <= max_duration:
+        if natural:
+            new_end = min(float(video_duration), min(natural) + 0.2)
+        elif later and later[0] - new_start <= max_duration:
             new_end = min(float(video_duration), later[0] + 0.2)
         else:
             return original
