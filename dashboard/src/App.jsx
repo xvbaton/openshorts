@@ -1228,6 +1228,10 @@ function App() {
   };
 
   const handleProcess = async (data, forceLowQuality = false) => {
+    if (!billingEnabled && status === 'processing') {
+      setActiveTab('dashboard');
+      return; // Never submit a duplicate while a local generation is active.
+    }
     // Hosted: must be signed in AND on an active plan/trial. Self-host: BYOK keys.
     if (billingEnabled) {
       // The billing gate below is unchanged: signed in, then entitled, then the
@@ -1446,7 +1450,11 @@ function App() {
   // One nav definition drives all three surfaces: the desktop rail, the mobile
   // drawer, and the bottom tab bar. `short` is the tab-bar label — the full one
   // wraps to two lines in a 5-up bar on a 360px phone.
-  const navItems = [
+  const navItems = !billingEnabled ? [
+    { id: 'dashboard', ord: '01', icon: LayoutDashboard, label: 'Générer', short: 'générer', primary: true },
+    { id: 'projects', ord: '02', icon: History, label: 'Mes projets', short: 'projets', primary: true },
+    { id: 'settings', ord: '03', icon: Settings, label: 'Paramètres', short: 'réglages', primary: true },
+  ] : [
     { id: 'dashboard', ord: '01', icon: LayoutDashboard, label: 'Clip Generator', short: 'clips', primary: true },
     // Cloud only: it runs on the managed pipeline and the Upload-Post connection.
     ...(billingEnabled ? [{ id: 'autopilot', ord: '02', icon: Rocket, label: 'Autopilot', short: 'autopilot', isNew: true }] : []),
@@ -1691,12 +1699,12 @@ function App() {
             </span>
             {status !== 'idle' && (
               <button
-                onClick={handleReset}
+                onClick={() => { if (!billingEnabled && status === 'processing') goToTab('projects'); else handleReset(); }}
                 className="btn-quiet px-3 py-1.5 text-xs shrink-0"
-                aria-label="New Project"
+                aria-label={!billingEnabled && status === 'processing' ? 'Mes projets' : 'New Project'}
               >
                 <Plus size={14} />
-                <span className="hidden sm:inline">New Project</span>
+                <span className="hidden sm:inline">{!billingEnabled && status === 'processing' ? 'Mes projets' : 'Nouveau projet'}</span>
               </button>
             )}
           </div>
@@ -1808,7 +1816,7 @@ function App() {
         )}
 
         {/* Included tools (Clip Generator, YouTube Studio): non-blocking trial prompt. */}
-        {gateThisTab && <TrialGate toolName={TOOL_NAMES[activeTab] || 'this'} />}
+        {billingEnabled && gateThisTab && <TrialGate toolName={TOOL_NAMES[activeTab] || 'this'} />}
 
         {/* Advanced tools (AI Shorts, AI Agent): BYOK fal.ai + ElevenLabs notice. */}
         {billingEnabled && advancedThisTab && <AdvancedBanner needsPlan={needsPlan} onKeys={() => goToTab('settings')} />}
