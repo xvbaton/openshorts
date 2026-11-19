@@ -3,6 +3,7 @@ import argparse
 from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -57,13 +58,18 @@ class TranscriptionHandler(BaseHTTPRequestHandler):
                         audio.write(chunk)
                         remaining -= len(chunk)
                 started = time.monotonic()
-                subprocess.run([
+                language = os.environ.get("WHISPERKIT_LANGUAGE", "").strip().lower()
+                command = [
                     self.cli, "transcribe", "--model-path", self.model_path,
                     "--audio-path", str(wav), "--report", "--report-path", directory,
+                    "--task", "transcribe",
                     "--word-timestamps", "--skip-special-tokens", "--incremental-loading",
                     "--audio-encoder-compute-units", "cpuAndGPU",
                     "--text-decoder-compute-units", "cpuAndGPU",
-                ], check=True, timeout=self.inference_timeout, stdin=subprocess.DEVNULL,
+                ]
+                if language and language != "auto":
+                    command.extend(["--language", language])
+                subprocess.run(command, check=True, timeout=self.inference_timeout, stdin=subprocess.DEVNULL,
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 report = json.loads(wav.with_suffix(".json").read_text(encoding="utf-8"))
                 if not valid_transcript(report):
@@ -71,6 +77,7 @@ class TranscriptionHandler(BaseHTTPRequestHandler):
                 report["metadata"] = {
                     "backend": "whisperkit", "model": Path(self.model_path).name,
                     "compute_units": "cpuAndGPU", "audio_loading": "incremental",
+                    "task": "transcribe", "requested_language": language or "auto",
                     "wall_seconds": time.monotonic() - started,
                 }
                 body = json.dumps(report, ensure_ascii=False, allow_nan=False).encode("utf-8")
