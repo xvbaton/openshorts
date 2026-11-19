@@ -1228,10 +1228,6 @@ function App() {
   };
 
   const handleProcess = async (data, forceLowQuality = false) => {
-    if (!billingEnabled && status === 'processing') {
-      setActiveTab('dashboard');
-      return; // Never submit a duplicate while a local generation is active.
-    }
     // Hosted: must be signed in AND on an active plan/trial. Self-host: BYOK keys.
     if (billingEnabled) {
       // The billing gate below is unchanged: signed in, then entitled, then the
@@ -1699,12 +1695,12 @@ function App() {
             </span>
             {status !== 'idle' && (
               <button
-                onClick={() => { if (!billingEnabled && status === 'processing') goToTab('projects'); else handleReset(); }}
+                onClick={handleReset}
                 className="btn-quiet px-3 py-1.5 text-xs shrink-0"
-                aria-label={!billingEnabled && status === 'processing' ? 'Mes projets' : 'New Project'}
+                aria-label="Nouveau projet"
               >
                 <Plus size={14} />
-                <span className="hidden sm:inline">{!billingEnabled && status === 'processing' ? 'Mes projets' : 'Nouveau projet'}</span>
+                <span className="hidden sm:inline">Nouveau projet</span>
               </button>
             )}
           </div>
